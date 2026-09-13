@@ -8,9 +8,22 @@
     <link rel="apple-touch-icon" href="/static/png/files-256.png">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>文件分享</title>
+    <script>
+        // 首帧前应用主题，避免闪烁：localStorage 优先，其次跟随系统
+        (function () {
+            try {
+                var t = localStorage.getItem('theme');
+                if (t !== 'light' && t !== 'dark') {
+                    t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+                }
+                document.documentElement.dataset.theme = t;
+            } catch (e) { /* 隐私模式等场景下保持默认暗色 */ }
+        })();
+    </script>
     <link rel="stylesheet" href="/static/css/style.css">
     <link rel="stylesheet" href="/static/vendor/katex/katex@0.16.9.min.css">
-    <link rel="stylesheet" href="/static/vendor/hljs/styles/github-dark@11.9.0.min.css">
+    <link rel="stylesheet" id="hljsDark" href="/static/vendor/hljs/styles/github-dark@11.9.0.min.css">
+    <link rel="stylesheet" id="hljsLight" href="/static/vendor/hljs/styles/github-light@11.9.0.min.css" disabled>
     <style>
         body{background:var(--bg-base);color:var(--text-primary);font-family:var(--font);margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;overflow:auto}
         .share-container{width:100%;max-width:800px;padding:24px 20px;margin:0 auto}
@@ -106,6 +119,16 @@
     </style>
 </head>
 <body>
+    <button id="themeToggle" class="theme-toggle" type="button" aria-label="切换浅色/深色模式" title="切换主题">
+        <svg class="sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+        </svg>
+        <svg class="moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+    </button>
+
     <div class="share-container" id="app">
         <div class="loading"><div class="spinner"></div> 加载中...</div>
     </div>
@@ -852,5 +875,6 @@
         }
     })();
     </script>
+    <script src="/static/js/theme.js"></script>
 </body>
 </html>

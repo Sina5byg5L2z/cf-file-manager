@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="color-scheme" content="dark">
@@ -8,32 +8,115 @@
     <link rel="apple-touch-icon" href="/static/png/files-256.png">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>File Manager - Login</title>
+    <script>
+        // 首帧前应用主题，避免闪烁：localStorage 优先，其次跟随系统
+        (function () {
+            try {
+                var t = localStorage.getItem('theme');
+                if (t !== 'light' && t !== 'dark') {
+                    t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+                }
+                document.documentElement.dataset.theme = t;
+            } catch (e) { /* 隐私模式等场景下保持默认暗色 */ }
+        })();
+    </script>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
-<body class="login-body">
-    <div class="login-container">
-        <div class="login-card">
-            <div class="login-header">
-                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color:var(--accent)" stroke-width="2">
+<body class="login-page">
+    <button id="themeToggle" class="theme-toggle" type="button" aria-label="切换浅色/深色模式" title="切换主题">
+        <svg class="sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+        </svg>
+        <svg class="moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+    </button>
+
+    <main class="login-layout">
+        <!-- 左侧品牌面板 -->
+        <section class="brand-panel" aria-hidden="true">
+            <div class="brand-lockup">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
                 </svg>
-                <h1>File Manager</h1>
+                FM://v1
             </div>
-            <form id="loginForm">
-                <div class="form-group">
-                    <label for="username">用户名</label>
-                    <input type="text" id="username" name="username" placeholder="用户名" autocomplete="username">
+            <div class="brand-word">FILES</div>
+            <div class="float-card fc-1">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>
+                </svg>
+            </div>
+            <div class="float-card fc-2">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                </svg>
+            </div>
+            <div class="float-card fc-3">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>
+                </svg>
+            </div>
+            <div class="brand-foot">CF-WORKER // SECURE STORAGE</div>
+        </section>
+
+        <!-- 右侧登录表单 -->
+        <section class="form-panel">
+            <div class="auth-card">
+                <div class="auth-eyebrow">// AUTH_REQUIRED</div>
+                <div class="auth-title">
+                    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                    </svg>
+                    <h1>File Manager</h1>
                 </div>
-                <div class="form-group">
-                    <label for="password">密码</label>
-                    <input type="password" id="password" name="password" placeholder="输入密码" autofocus autocomplete="current-password">
-                </div>
-                <button type="submit" class="btn btn-primary btn-block">登录</button>
-                <div id="loginError" class="error-msg" style="display:none"></div>
-            </form>
-        </div>
-    </div>
+                <p class="auth-sub">登录以访问你的文件库</p>
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label for="username">用户名</label>
+                        <div class="input-wrap">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+                            </svg>
+                            <input type="text" id="username" name="username" placeholder="用户名" autocomplete="username">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="password">密码</label>
+                        <div class="input-wrap">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                            </svg>
+                            <input type="password" id="password" name="password" placeholder="输入密码" autofocus autocomplete="current-password">
+                            <button type="button" class="eye-btn" id="eyeBtn" aria-label="显示/隐藏密码">
+                                <svg class="eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+                                </svg>
+                                <svg class="eye-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-block">登 录</button>
+                    <div id="loginError" class="error-msg" style="display:none"></div>
+                </form>
+                <div class="auth-foot">FILE MANAGER · CLOUDFLARE WORKERS</div>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/js/theme.js"></script>
     <script>
+        // 密码显示/隐藏
+        const pwdInput = document.getElementById('password');
+        document.getElementById('eyeBtn').addEventListener('click', function () {
+            const show = pwdInput.type === 'password';
+            pwdInput.type = show ? 'text' : 'password';
+            this.classList.toggle('show', show);
+        });
+
         // If already logged in, redirect
         const token = localStorage.getItem('token');
         if (token) {
