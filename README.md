@@ -15,8 +15,7 @@
 
 ## 设计要点（面向 Cloudflare 免费额度）
 
-- 不使用 KV、不使用 R2（无需绑定银行卡）：元数据与文件内容（1MB 分片 BLOB）全部存 D1（额度更高）
-- 大文件可选转存 [Backblaze B2](https://www.backblazeb2.com/)（配置 secrets 即启用），未配置时走 D1
+- 不使用 KV、不使用 R2：元数据与文件内容（1MB 分片 BLOB）全部存 D1（额度更高）
 - 公开图片 `/i/*`、私有预览 / 下载、目录列表、分享元数据全部走边缘 Cache API，命中时 0 次 D1 读取；`immutable` 缓存头让浏览器也不再回源
 - 分片上传直接写暂存区，complete 时单条 `INSERT..SELECT` 合并，写放大最小
 - D1 免费额度：存储 5GB / 行读 500 万每天 / 行写 10 万每天
@@ -40,7 +39,6 @@
 
 可选增强：
 
-- **大文件转存 B2**（D1 免费 5GB 用满后）：`wrangler secret put B2_KEY_ID` / `B2_APP_KEY` / `B2_ENDPOINT`，并把 `B2_BUCKET` 改成你的桶名
 - **自定义域名**：在 `wrangler.jsonc` 中取消 `routes` 注释并改成你的域名，或直接在 Dashboard 的 Worker 设置里绑定
 
 ## 手动部署
@@ -78,7 +76,6 @@ npm run dev                            # http://localhost:8787
 | `JWT_EXPIRE_HOURS` | `24` | JWT 有效期（小时） |
 | `MAX_UPLOAD_SIZE` | `209715200` | 单文件大小上限（字节），D1 免费 5GB 总存储请按需调整 |
 | `ZIP_MAX_TOTAL` | `33554432` | 打包（zip）下载总大小上限，超出返回 413（Worker 内存限制） |
-| `B2_BUCKET` | — | B2 桶名（配置 B2 secrets 后大文件转存） |
 
 **secrets**：
 
@@ -87,7 +84,6 @@ npm run dev                            # http://localhost:8787
 | `JWT_SECRET` | 是 | JWT 签名密钥，任意长随机串 |
 | `AUTH_PASSWORD_HASH` | 二选一 | `node tools/hash-password.mjs "密码"` 输出（推荐） |
 | `AUTH_PASSWORD` | 二选一 | 明文密码（图省事） |
-| `B2_KEY_ID` / `B2_APP_KEY` / `B2_ENDPOINT` | 否 | 大文件 >1MB 转存 B2；未配置时大文件上传报 503 |
 
 首次登录时若用户表为空，会自动从 secrets 播种账号；之后修改用户名 / 密码请直接用页面内「账号设置」（改完 secrets 可删除）。
 

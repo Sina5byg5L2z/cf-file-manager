@@ -62,15 +62,9 @@
     // 单文件大小上限（字节）。D1 免费 5GB 总存储，请按需调整
     "MAX_UPLOAD_SIZE": "209715200",
     // 打包(zip)下载总大小上限，超出返回 413（Worker 内存限制）
-    "ZIP_MAX_TOTAL": "33554432",
-    // B2 桶名（大文件存储; 密钥走 secrets: B2_KEY_ID/B2_APP_KEY/B2_ENDPOINT）
-    "B2_BUCKET": "file-manager-b2"
+    "ZIP_MAX_TOTAL": "33554432"
   }
   // 需要额外 secret: JWT_SECRET + (AUTH_PASSWORD_HASH 或 AUTH_PASSWORD)
   //   wrangler secret put JWT_SECRET
   //   wrangler secret put AUTH_PASSWORD_HASH
-  // B2 secrets (大文件 >1MB 存 B2; 未配置时大文件上传报 503):
-  //   wrangler secret put B2_KEY_ID      # B2 后台 Application Keys 的 keyID
-  //   wrangler secret put B2_APP_KEY     # applicationKey
-  //   wrangler secret put B2_ENDPOINT    # 桶详情页 Endpoint, 形如 https://s3.us-west-004.backblazeb2.com
 }
