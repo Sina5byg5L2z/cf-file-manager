@@ -1,0 +1,76 @@
+// ============================================================================
+// cf-file-manager - Cloudflare Workers 部署配置
+// ============================================================================
+// 一键部署: 点 README 里的 Deploy to Cloudflare 按钮, D1 数据库会自动创建并绑定,
+//           secrets 按提示填写即可, 无需修改本文件。
+//
+// 手动部署步骤（在项目目录下执行）:
+//
+//   1. npm i -g wrangler && wrangler login
+//   2. wrangler d1 create file-manager        # 把输出的 database_id 填到下面
+//   3. wrangler d1 execute file-manager --remote --file=./schema.sql
+//   4. 配置登录账号（二选一，推荐 hash）:
+//        # 生成密码哈希:  node tools/hash-password.mjs "你的密码"
+//        wrangler secret put AUTH_PASSWORD_HASH    # 粘贴 hash-password 输出
+//        # 或者直接明文（仅个人使用图省事）:
+//        wrangler secret put AUTH_PASSWORD
+//        wrangler secret put JWT_SECRET            # 任意长随机串, 如: openssl rand -hex 32
+//   5. wrangler deploy
+//
+// 免费额度策略（本 Worker 的设计目标: 尽量少碰 KV/D1）:
+//   - 不使用 KV（额度最低），全部状态放 D1（额度更高）
+//   - 不使用 R2；文件内容以 1MB 分片 BLOB 存进 D1
+//   - 公开图片 /i/*、私有预览/下载、目录列表、分享元数据 全部走边缘 Cache API，
+//     命中时 0 次 D1 读取；文件名不可变 + immutable 缓存头让浏览器也不再回源
+//   - 分片上传直接写暂存区，complete 时单条 INSERT..SELECT 合并，写放大最小
+//   - D1 免费额度: 存储 5GB / 行读 500万每天 / 行写 10万每天
+// ============================================================================
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "file-manager",
+  "main": "src/index.js",
+  "compatibility_date": "2025-09-01",
+  "assets": {
+    "directory": "./public",
+    // 命中静态文件的请求不进 Worker（不计费、不限流）；未命中走 Worker 路由
+    "not_found_handling": "none",
+    // 必须显式声明 binding, 否则 env.ASSETS 未定义, /s/<id> 等内部页面会 500
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "file-manager",
+      // 一键部署时 Cloudflare 会自动创建 D1 并回填真实 id；
+      // 手动部署时替换为 `wrangler d1 create file-manager` 输出的 database_id
+      "database_id": "placeholder"
+    }
+  ],
+  // 可选: 自定义域名绑定（部署时自动创建 Custom Domain, 改成你账户内可用区域中的域名）
+  // "routes": [
+  //   { "pattern": "your-domain.com", "custom_domain": true }
+  // ],
+  "triggers": {
+    // 每天清理过期的上传暂存分片
+    "crons": ["0 3 * * *"]
+  },
+  "vars": {
+    // 登录用户名
+    "AUTH_USERNAME": "admin",
+    // JWT 有效期（小时）
+    "JWT_EXPIRE_HOURS": "24",
+    // 单文件大小上限（字节）。D1 免费 5GB 总存储，请按需调整
+    "MAX_UPLOAD_SIZE": "209715200",
+    // 打包(zip)下载总大小上限，超出返回 413（Worker 内存限制）
+    "ZIP_MAX_TOTAL": "33554432",
+    // B2 桶名（大文件存储; 密钥走 secrets: B2_KEY_ID/B2_APP_KEY/B2_ENDPOINT）
+    "B2_BUCKET": "file-manager-b2"
+  }
+  // 需要额外 secret: JWT_SECRET + (AUTH_PASSWORD_HASH 或 AUTH_PASSWORD)
+  //   wrangler secret put JWT_SECRET
+  //   wrangler secret put AUTH_PASSWORD_HASH
+  // B2 secrets (大文件 >1MB 存 B2; 未配置时大文件上传报 503):
+  //   wrangler secret put B2_KEY_ID      # B2 后台 Application Keys 的 keyID
+  //   wrangler secret put B2_APP_KEY     # applicationKey
+  //   wrangler secret put B2_ENDPOINT    # 桶详情页 Endpoint, 形如 https://s3.us-west-004.backblazeb2.com
+}

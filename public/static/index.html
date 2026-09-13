@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/png/files-32.png">
+<link rel="icon" type="image/png" sizes="256x256" href="/static/png/files-256.png">
+<link rel="apple-touch-icon" href="/static/png/files-256.png">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Manager</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+</head>
+<body>
+    <!-- Top toolbar -->
+    <header class="toolbar">
+        <div class="toolbar-left">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#4f8cff" stroke-width="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+            <span class="toolbar-title">File Manager</span>
+        </div>
+        <div class="toolbar-center">
+            <div class="search-box">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input type="text" id="searchInput" placeholder="搜索文件...">
+                <div id="searchResults" class="search-results" style="display:none"></div>
+            </div>
+        </div>
+        <div class="toolbar-right">
+            <button id="btnShares" class="btn btn-sm" title="分享管理">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+                    <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+                </svg>
+            </button>
+            <button id="btnImageHost" class="btn btn-sm" title="图床管理">📷</button>
+            <span id="usernameDisplay" class="username"></span>
+            <button id="btnLogout" class="btn btn-sm btn-danger" title="退出">退出</button>
+        </div>
+    </header>
+
+    <!-- Breadcrumb -->
+    <nav class="breadcrumb" id="breadcrumb"></nav>
+
+    <!-- Action bar -->
+    <div class="action-bar" id="actionBar">
+        <button id="btnGoUp" class="btn btn-sm" title="上级目录" style="display:none">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <button id="btnUpload" class="btn btn-sm btn-primary">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            上传
+        </button>
+        <button id="btnMkdir" class="btn btn-sm">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+            新建文件夹
+        </button>
+        <button id="btnToggleHidden" class="btn btn-sm" title="显示/隐藏隐藏文件">
+            <svg id="hiddenIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            <span id="hiddenLabel">显示隐藏</span>
+        </button>
+        <button id="btnRefresh" class="btn btn-sm" title="刷新">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        </button>
+        <button id="btnPaste" class="btn btn-sm btn-primary" style="display:none" title="粘贴">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            粘贴
+        </button>
+        <div class="action-bar-right">
+            <div class="view-toggle">
+                <button id="btnGridView" class="btn btn-sm active" title="网格视图">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                </button>
+                <button id="btnListView" class="btn btn-sm" title="列表视图">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                </button>
+            </div>
+            <select id="sortSelect" class="select-sm">
+                <option value="name:asc">名称 ↑</option>
+                <option value="name:desc">名称 ↓</option>
+                <option value="size:asc">大小 ↑</option>
+                <option value="size:desc">大小 ↓</option>
+                <option value="modified:asc">日期 ↑</option>
+                <option value="modified:desc">日期 ↓</option>
+                <option value="ext:asc">类型 ↑</option>
+                <option value="ext:desc">类型 ↓</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- Batch action bar (shown when items selected) -->
+    <div class="batch-bar" id="batchBar" style="display:none">
+        <span id="selectedCount">0 项已选</span>
+        <button id="btnBatchDownload" class="btn btn-sm">打包下载</button>
+        <button id="btnBatchDelete" class="btn btn-sm btn-danger">批量删除</button>
+        <button id="btnBatchMove" class="btn btn-sm">移动到...</button>
+        <button id="btnClearSelection" class="btn btn-sm">取消选择</button>
+    </div>
+
+    <!-- Upload zone overlay -->
+    <div class="upload-overlay" id="uploadOverlay" style="display:none">
+        <div class="upload-zone">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#4f8cff" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <p>拖拽文件到此处上传</p>
+        </div>
+    </div>
+
+    <!-- Upload progress -->
+    <div class="upload-progress" id="uploadProgress" style="display:none">
+        <div class="upload-progress-header">
+            <span>上传中...</span>
+            <button id="btnCloseProgress" class="btn btn-sm">✕</button>
+        </div>
+        <div id="uploadList" class="upload-list"></div>
+    </div>
+
+    <!-- Main file area -->
+    <main class="file-area" id="fileArea">
+        <div class="file-grid" id="fileGrid"></div>
+    </main>
+
+    <!-- Context menu -->
+    <div class="context-menu" id="contextMenu" style="display:none">
+        <div class="context-item" data-action="open">打开</div>
+        <div class="context-item" data-action="preview">预览</div>
+        <div class="context-divider"></div>
+        <div class="context-item" data-action="rename">重命名</div>
+        <div class="context-item" data-action="copy">复制</div>
+        <div class="context-item" data-action="move">移动</div>
+        <div class="context-item" data-action="download">下载</div>
+        <div class="context-item" data-action="share">分享</div>
+        <div class="context-item context-ih-import" data-action="imagehost" style="display:none">📷 上传到图床</div>
+        <div class="context-divider"></div>
+        <div class="context-item context-danger" data-action="delete">删除</div>
+    </div>
+
+    <!-- Preview modal -->
+    <div class="modal-overlay" id="previewModal" style="display:none">
+        <div class="modal preview-modal">
+            <div class="modal-header">
+                <div class="preview-header-left">
+                    <span id="previewTitle">预览</span>
+                    <span id="previewInfo" class="preview-info"></span>
+                </div>
+                <div class="preview-header-right">
+                    <button class="btn btn-sm" id="btnPreviewNewTab" title="新标签页打开">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                    </button>
+                    <button class="btn btn-sm" id="btnPreviewDownload" title="下载">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    </button>
+                    <button class="modal-close" id="btnClosePreview">✕</button>
+                </div>
+            </div>
+            <div class="modal-body" id="previewBody"></div>
+        </div>
+    </div>
+
+    <!-- Share modal -->
+    <div class="modal-overlay" id="shareModal" style="display:none">
+        <div class="modal share-modal">
+            <div class="modal-header">
+                <span>创建分享链接</span>
+                <button class="modal-close" id="btnCloseShare">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>密码保护 (可选)</label>
+                    <input type="text" id="sharePassword" placeholder="留空则无密码">
+                </div>
+                <div class="form-group">
+                    <label>有效期</label>
+                    <select id="shareExpiry">
+                        <option value="1">1 小时</option>
+                        <option value="24" selected>24 小时</option>
+                        <option value="168">7 天</option>
+                        <option value="720">30 天</option>
+                        <option value="0">永久</option>
+                    </select>
+                </div>
+                <button id="btnCreateShare" class="btn btn-primary">生成链接</button>
+                <div id="shareResult" style="display:none; margin-top:12px">
+                    <label>分享链接</label>
+                    <div class="share-link-row">
+                        <input type="text" id="shareLink" readonly>
+                        <button id="btnCopyShare" class="btn btn-sm">复制</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Share management modal -->
+    <div class="modal-overlay" id="sharesModal" style="display:none">
+        <div class="modal shares-modal">
+            <div class="modal-header">
+                <span>分享管理</span>
+                <button class="modal-close" id="btnCloseShares">✕</button>
+            </div>
+            <div class="modal-body" id="sharesBody"></div>
+        </div>
+    </div>
+
+    <!-- Move dialog -->
+    <div class="modal-overlay" id="moveModal" style="display:none">
+        <div class="modal move-modal">
+            <div class="modal-header">
+                <span>移动到</span>
+                <button class="modal-close" id="btnCloseMove">✕</button>
+            </div>
+            <div class="modal-body">
+                <div id="moveTree" class="move-tree"></div>
+                <div class="form-group">
+                    <label>目标路径</label>
+                    <input type="text" id="moveTarget" readonly>
+                </div>
+                <button id="btnConfirmMove" class="btn btn-primary">确认移动</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/player.js"></script>
+    <script src="/static/js/fileicons.js?v=b200724b"></script>
+    <script src="/static/js/filemanager.js"></script>
+    <script src="/static/js/upload.js"></script>
+    <script src="/static/js/preview.js"></script>
+    <script src="/static/js/share.js"></script>
+    <script src="/static/js/imagehost.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

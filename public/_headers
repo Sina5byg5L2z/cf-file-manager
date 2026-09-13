@@ -1,0 +1,21 @@
+# Cloudflare Workers Static Assets 缓存规则 (wrangler deploy 时生效, _headers 本身不会作为静态文件发布)
+# fileicons.js 体积大 (~2.3MB) 但极少变更; 构建脚本 tools/build-fileicons.mjs 会在 HTML 引用上写 ?v=<内容hash>,
+# 内容变更 → URL 变化 → 缓存自动失效, 因此可放心 immutable 长缓存
+/static/js/fileicons.js
+  Cache-Control: public, max-age=31536000, immutable
+
+# vendor 第三方库 (marked/DOMPurify/KaTeX/highlight.js): 文件名带版本号, 内容不可变, 缓存 1 年
+# 升级库时把文件名里的版本号一起改掉, URL 变化 → 缓存自然失效
+/static/vendor/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# HTML 入口不缓存: HTML 引用带 ?v= 的 JS, HTML 必须每次新鲜才能让新版 JS 立即生效,
+# 否则浏览器钉住旧 HTML → 引用旧 URL 的 JS → 部署后用户端长期跑旧代码 (手机上实际发生过)
+/
+  Cache-Control: no-store
+/app
+  Cache-Control: no-store
+/share
+  Cache-Control: no-store
+/share/*
+  Cache-Control: no-store

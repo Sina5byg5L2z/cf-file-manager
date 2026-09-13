@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="color-scheme" content="dark">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/png/files-32.png">
+    <link rel="icon" type="image/png" sizes="256x256" href="/static/png/files-256.png">
+    <link rel="apple-touch-icon" href="/static/png/files-256.png">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文件分享</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/vendor/katex/katex@0.16.9.min.css">
+    <link rel="stylesheet" href="/static/vendor/hljs/styles/github-dark@11.9.0.min.css">
+    <style>
+        body{background:var(--bg-base);color:var(--text-primary);font-family:var(--font);margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;overflow:auto}
+        .share-container{width:100%;max-width:800px;padding:24px 20px;margin:0 auto}
+        .share-header{display:flex;align-items:center;gap:12px;padding:16px 0;border-bottom:1px solid var(--border);margin-bottom:20px}
+        .share-header svg{flex-shrink:0}
+        .share-title{font-size:18px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .share-meta{font-size:12px;color:var(--text-tertiary);margin-top:4px}
+
+        /* Password form */
+        .pwd-form{max-width:360px;margin:80px auto;text-align:center}
+        .pwd-form h2{font-size:16px;margin-bottom:16px;color:var(--text-secondary)}
+        .pwd-form input{width:100%;padding:10px 14px;background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-md);color:var(--text-primary);font-size:14px;margin-bottom:12px;box-sizing:border-box}
+        .pwd-form input:focus{outline:none;border-color:var(--accent)}
+        .pwd-form .btn{width:100%}
+
+        /* File list */
+        .file-list{display:flex;flex-direction:column;gap:2px}
+        .file-row{display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:var(--radius-md);transition:background .08s}
+        .file-row:hover{background:var(--hover-bg)}
+        .file-icon{font-size:20px;flex-shrink:0;width:28px;height:28px;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:4px}
+        .file-icon img{width:28px;height:28px;object-fit:cover;border-radius:4px}
+        .file-info{flex:1;min-width:0}
+        .file-name{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;color:var(--text-primary)}
+        .file-name:hover{color:var(--accent)}
+        .file-name.dir{color:var(--accent);font-weight:500}
+        .file-size{font-size:12px;color:var(--text-tertiary)}
+        .file-actions{flex-shrink:0}
+        .file-actions .btn{padding:4px 10px;font-size:12px}
+
+        /* File detail */
+        .file-detail{text-align:center;padding:40px 20px}
+        .file-detail .icon{font-size:48px;margin-bottom:16px}
+        .file-detail .name{font-size:18px;font-weight:600;margin-bottom:8px}
+        .file-detail .size{font-size:14px;color:var(--text-secondary);margin-bottom:24px}
+        .file-detail .actions{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+
+        /* Preview area */
+        .preview-area{margin-top:24px;border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden;background:var(--bg-surface)}
+        .preview-area img{max-width:100%;display:block;margin:0 auto}
+        .preview-area video,.preview-area audio{width:100%}
+        .preview-area pre{padding:16px;margin:0;overflow:auto;max-height:500px;font-size:13px;line-height:1.5}
+        .preview-area pre code{font-family:'Cascadia Code','Fira Code','JetBrains Mono',Consolas,monospace}
+
+        /* Markdown preview */
+        .preview-markdown{padding:20px 24px;line-height:1.7;font-size:14px;overflow:auto;max-height:600px}
+        .preview-markdown h1{font-size:1.6em;border-bottom:1px solid var(--border);padding-bottom:8px;margin:16px 0 12px}
+        .preview-markdown h2{font-size:1.4em;border-bottom:1px solid var(--border);padding-bottom:6px;margin:14px 0 10px}
+        .preview-markdown h3{font-size:1.2em;margin:12px 0 8px}
+        .preview-markdown h4,.preview-markdown h5,.preview-markdown h6{margin:10px 0 6px}
+        .preview-markdown p{margin:8px 0}
+        .preview-markdown blockquote{border-left:3px solid var(--accent);padding:4px 12px;margin:8px 0;color:var(--text-secondary);background:var(--hover-bg);border-radius:0 var(--radius-sm) var(--radius-sm) 0}
+        .preview-markdown ul,.preview-markdown ol{padding-left:24px;margin:8px 0}
+        .preview-markdown li{margin:4px 0}
+        .preview-markdown hr{border:none;border-top:1px solid var(--border);margin:16px 0}
+        .preview-markdown table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13px}
+        .preview-markdown th,.preview-markdown td{border:1px solid var(--border);padding:6px 12px;text-align:left}
+        .preview-markdown th{background:var(--hover-bg);font-weight:600}
+        .preview-markdown code{background:var(--hover-bg);padding:2px 6px;border-radius:3px;font-size:0.9em;font-family:'Cascadia Code','Fira Code','JetBrains Mono',Consolas,monospace}
+        .preview-markdown .md-inline-code{background:var(--hover-bg);padding:2px 6px;border-radius:3px}
+        .preview-markdown .md-code-block{background:var(--bg-base);border:1px solid var(--border);border-radius:var(--radius-md);overflow-x:auto}
+        .preview-markdown .md-code-block code{background:none;padding:0;font-size:13px;line-height:1.5}
+        .preview-markdown a{color:var(--accent);text-decoration:none}
+        .preview-markdown a:hover{text-decoration:underline}
+        .preview-markdown img{max-width:100%;border-radius:var(--radius-md);margin:8px 0}
+        .preview-markdown strong{font-weight:600}
+
+        /* HTML preview */
+        .preview-html-frame{width:100%;height:500px;border:none;background:#fff}
+        .preview-html-source{padding:16px;margin:0;overflow:auto;max-height:500px;font-size:13px;line-height:1.5}
+
+        /* Breadcrumb */
+        .breadcrumb{display:flex;align-items:center;gap:4px;font-size:13px;margin-bottom:16px;flex-wrap:wrap}
+        .breadcrumb a{color:var(--accent);text-decoration:none}
+        .breadcrumb a:hover{text-decoration:underline}
+        .breadcrumb .sep{color:var(--text-tertiary)}
+
+        /* Error states */
+        .error-box{text-align:center;padding:60px 20px}
+        .error-box .icon{font-size:48px;margin-bottom:16px}
+        .error-box .msg{font-size:16px;color:var(--text-secondary);margin-bottom:8px}
+        .error-box .detail{font-size:13px;color:var(--text-tertiary)}
+
+        /* Loading */
+        .loading{display:flex;align-items:center;justify-content:center;padding:60px 20px;gap:12px;color:var(--text-tertiary)}
+        .spinner{width:24px;height:24px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+        @keyframes spin{to{transform:rotate(360deg)}}
+
+        /* Responsive */
+        @media(max-width:600px){
+            .share-container{padding:16px 12px}
+            .file-row{padding:8px 10px}
+        }
+    </style>
+</head>
+<body>
+    <div class="share-container" id="app">
+        <div class="loading"><div class="spinner"></div> 加载中...</div>
+    </div>
+
+    <script src="/static/js/fileicons.js?v=b200724b"></script>
+    <script src="/static/js/dialog.js"></script>
+    <script src="/static/js/player.js?v=20260913b"></script>
+    <script src="/static/vendor/katex/katex@0.16.9.min.js"></script>
+    <script src="/static/vendor/hljs/highlight@11.9.0.min.js"></script>
+    <script src="/static/js/hljs-async.js?v=20260912d"></script>
+    <script src="/static/vendor/marked@15.0.12.min.js"></script>
+    <script src="/static/vendor/purify@3.4.15.min.js"></script>
+    <script>
+    (function() {
+        const shareId = window.location.pathname.split('/s/')[1]?.split('?')[0]?.split('/')[0] || '';
+        const app = document.getElementById('app');
+        let currentPassword = '';
+        let currentPath = '';
+        let currentSubPath = '';
+        let dirEntries = []; // cached for inline preview back navigation
+
+        // 预览阈值: 移动端内存/CPU 更紧, 全面收紧 (文本显示链路; 渲染预览 iframe 是独立异步链路)
+        const IS_MOBILE = /Mobi|Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)
+            || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+        const LIMIT_MD = IS_MOBILE ? 256 * 1024 : 512 * 1024;
+        const LIMIT_HTML = IS_MOBILE ? 1024 * 1024 : 5 * 1024 * 1024;
+        const LIMIT_TEXT = IS_MOBILE ? 512 * 1024 : 1024 * 1024;
+        const LIMIT_DISPLAY = IS_MOBILE ? 64 * 1024 : 128 * 1024;
+
+        function esc(s) {
+            const d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+
+        function formatSize(bytes) {
+            if (!bytes || bytes === 0) return '';
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+            if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+            return (bytes / 1073741824).toFixed(2) + ' GB';
+        }
+
+        function getFileIcon(name, isDir) {
+            // 优先 vendored vscode-icons SVG (与文件管理器一致); fileicons.js 未加载时回退旧 emoji
+            if (window.FileIcons) {
+                var h = FileIcons.html(name, isDir);
+                if (h) return h;
+            }
+            if (isDir) return '\uD83D\uDCC1';
+            const ext = (name.split('.').pop() || '').toLowerCase();
+            const icons = {
+                'pdf':'\uD83D\uDCC4','doc':'\uD83D\uDCC3','docx':'\uD83D\uDCC3','xls':'\uD83D\uDCC7','xlsx':'\uD83D\uDCC7',
+                'ppt':'\uD83D\uDCC8','pptx':'\uD83D\uDCC8','zip':'\uD83D\uDCE6','rar':'\uD83D\uDCE6','7z':'\uD83D\uDCE6','tar':'\uD83D\uDCE6','gz':'\uD83D\uDCE6',
+                'jpg':'\uD83D\uDDBC\uFE0F','jpeg':'\uD83D\uDDBC\uFE0F','png':'\uD83D\uDDBC\uFE0F','gif':'\uD83D\uDDBC\uFE0F','webp':'\uD83D\uDDBC\uFE0F','svg':'\uD83D\uDDBC\uFE0F','bmp':'\uD83D\uDDBC\uFE0F',
+                'mp4':'\uD83C\uDFA5','avi':'\uD83C\uDFA5','mkv':'\uD83C\uDFA5','mov':'\uD83C\uDFA5','wmv':'\uD83C\uDFA5',
+                'mp3':'\uD83C\uDFA4','wav':'\uD83C\uDFA4','flac':'\uD83C\uDFA4','aac':'\uD83C\uDFA4','ogg':'\uD83C\uDFA4',
+                'py':'\uD83D\uDC0D','js':'\uD83D\uDCC4','ts':'\uD83D\uDCC4','java':'\u2615','rs':'\u269B\uFE0F','go':'\uD83D\uDC22',
+                'c':'\uD83D\uDCC4','cpp':'\uD83D\uDCC4','h':'\uD83D\uDCC4','cs':'\uD83D\uDCC4',
+                'html':'\uD83C\uDF10','css':'\uD83C\uDFA8','json':'\uD83D\uDCC4','xml':'\uD83D\uDCC4','yaml':'\uD83D\uDCC4','yml':'\uD83D\uDCC4',
+                'md':'\uD83D\uDCC4','txt':'\uD83D\uDCC4','log':'\uD83D\uDCC4','csv':'\uD83D\uDCCA',
+                'sh':'\u26A1','bat':'\u26A1','ps1':'\u26A1','sql':'\uD83D\uDDC4\uFE0F',
+                'exe':'\u2699\uFE0F','msi':'\u2699\uFE0F','dmg':'\u2699\uFE0F','iso':'\uD83D\uDCBF',
+            };
+            return icons[ext] || '\uD83D\uDCC4';
+        }
+
+        function isPreviewableText(ext) {
+            return ['txt','log','csv','tsv','ini','cfg','conf','yaml','yml','toml','json','xml',
+                    'css','js','ts','jsx','tsx','vue','py','rb','java','c','cpp',
+                    'h','hpp','cs','go','rs','swift','kt','php','sql','sh','bash','zsh','bat','ps1',
+                    'r','lua','pl','pm','dart','scala','groovy','less','scss','sass',
+                    'dockerfile','makefile','gitignore','editorconfig','env'].includes(ext);
+        }
+
+        function isPreviewableImage(ext) {
+            return ['jpg','jpeg','png','gif','webp','bmp','ico'].includes(ext);
+        }
+
+        function isPreviewableSvg(ext) {
+            return ext === 'svg';
+        }
+
+        function isPreviewableVideo(ext) {
+            return ['mp4','webm','ogg'].includes(ext);
+        }
+
+        function isPreviewableAudio(ext) {
+            return ['mp3','wav','ogg','flac','aac','m4a'].includes(ext);
+        }
+
+        function isPreviewablePdf(ext) {
+            return ext === 'pdf';
+        }
+
+        function isPreviewableMarkdown(ext) {
+            return ['md','mdx','markdown'].includes(ext);
+        }
+
+        function isPreviewableHtml(ext) {
+            return ['html','htm'].includes(ext);
+        }
+
+        function isPreviewableCode(ext) {
+            return ['json','xml','js','ts','jsx','tsx','vue','py','rb','java',
+                    'c','cpp','h','hpp','cs','go','rs','swift','kt','php','sql',
+                    'sh','bash','css','less','scss','sass'].includes(ext);
+        }
+
+        // highlight.js language mapping
+        var hljsLangMap = {
+            'js':'javascript','ts':'typescript','jsx':'javascript',
+            'tsx':'typescript','py':'python','rb':'ruby',
+            'rs':'rust','kt':'kotlin','sh':'bash','bash':'bash',
+            'yml':'yaml','md':'markdown','htm':'html',
+            'hpp':'cpp','h':'c','scss':'scss','sass':'sass',
+            'less':'less','cs':'csharp','vue':'html',
+            'dockerfile':'dockerfile','makefile':'makefile',
+            'bat':'bat','ps1':'powershell','r':'r',
+            'pl':'perl','pm':'perl','lua':'lua',
+            'dart':'dart','scala':'scala','groovy':'groovy',
+            'cfg':'ini','conf':'ini','env':'ini',
+            'gitignore':'ini','editorconfig':'ini',
+            'csv':'plaintext','tsv':'plaintext','log':'plaintext','txt':'plaintext'
+        };
+
+        function canPreview(ext) {
+            return isPreviewableText(ext) || isPreviewableImage(ext) || isPreviewableSvg(ext) ||
+                   isPreviewableVideo(ext) || isPreviewableAudio(ext) || isPreviewablePdf(ext) ||
+                   isPreviewableMarkdown(ext) || isPreviewableHtml(ext);
+        }
+
+        async function fetchData(subPath, password) {
+            let url = '/s/' + shareId + '?data=1';
+            if (subPath) url += '&sub_path=' + encodeURIComponent(subPath);
+            if (password) url += '&password=' + encodeURIComponent(currentPassword);
+            const res = await fetch(url);
+            const data = await res.json();
+            if (!res.ok && !data.need_password) throw new Error(data.error || '请求失败');
+            return data;
+        }
+
+        function showError(msg, detail) {
+            app.innerHTML = '<div class="error-box">' +
+                '<div class="icon">\u26A0\uFE0F</div>' +
+                '<div class="msg">' + esc(msg) + '</div>' +
+                (detail ? '<div class="detail">' + esc(detail) + '</div>' : '') +
+                '</div>';
+        }
+
+        function showPasswordForm(error) {
+            app.innerHTML = '<div class="pwd-form">' +
+                '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">' +
+                '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>' +
+                '<path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' +
+                '<h2>此分享需要密码</h2>' +
+                (error ? '<div style="color:var(--color-error);font-size:13px;margin-bottom:12px">' + esc(error) + '</div>' : '') +
+                '<input type="password" id="pwdInput" placeholder="请输入密码" autofocus>' +
+                '<button class="btn btn-primary" id="pwdSubmit">访问</button>' +
+                '</div>';
+            const input = document.getElementById('pwdInput');
+            const btn = document.getElementById('pwdSubmit');
+            btn.onclick = () => submitPassword(input.value);
+            input.onkeydown = (e) => { if (e.key === 'Enter') submitPassword(input.value); };
+            input.focus();
+        }
+
+        async function submitPassword(pwd) {
+            currentPassword = pwd;
+            await load();
+        }
+
+        function renderDirectory(data) {
+            const entries = data.entries || [];
+            dirEntries = entries;
+            const dirName = data.name || data.path || '分享文件';
+
+            // Breadcrumb
+            let html = '';
+            if (currentSubPath) {
+                const parts = currentSubPath.split('/').filter(Boolean);
+                html += '<div class="breadcrumb">';
+                html += '<a href="#" data-crumb="">根目录</a>';
+                let accum = '';
+                for (let i = 0; i < parts.length; i++) {
+                    accum += (accum ? '/' : '') + parts[i];
+                    html += '<span class="sep">/</span>';
+                    if (i < parts.length - 1) {
+                        html += '<a href="#" data-crumb="' + esc(accum) + '">' + esc(parts[i]) + '</a>';
+                    } else {
+                        html += '<span>' + esc(parts[i]) + '</span>';
+                    }
+                }
+                html += '</div>';
+            }
+
+            html += '<div class="share-header">' +
+                '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">' +
+                '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>' +
+                '<div><div class="share-title">' + esc(dirName) + '</div>' +
+                '<div class="share-meta">' + entries.length + ' 个项目</div></div>' +
+                '<div style="margin-left:auto"><button class="btn btn-primary" id="btnDownloadAll">\uD83D\uDCE6 下载全部</button></div></div>';
+
+            if (entries.length === 0) {
+                html += '<div style="text-align:center;padding:40px;color:var(--text-tertiary)">空文件夹</div>';
+            } else {
+                html += '<div class="file-list">';
+                for (const entry of entries) {
+                    if (!entry.is_dir) _entrySizes[entry.name] = entry.size;
+                    const ext = (entry.name.split('.').pop() || '').toLowerCase();
+                    const isImage = isPreviewableImage(ext);
+                    let icon;
+                    if (!entry.is_dir && isImage) {
+                        let thumbUrl = '/s/' + shareId + '?thumb=1&name=' + encodeURIComponent(entry.name);
+                        if (currentSubPath) thumbUrl += '&sub_path=' + encodeURIComponent(currentSubPath);
+                        if (currentPassword) thumbUrl += '&password=' + encodeURIComponent(currentPassword);
+                        icon = '<img src="' + thumbUrl + '" alt="" loading="lazy">';
+                    } else {
+                        icon = getFileIcon(entry.name, entry.is_dir);
+                    }
+                    html += '<div class="file-row">' +
+                        '<div class="file-icon">' + icon + '</div>' +
+                        '<div class="file-info">' +
+                        '<div class="file-name' + (entry.is_dir ? ' dir' : '') + '" data-name="' + esc(entry.name) + '" data-dir="' + entry.is_dir + '">' +
+                        esc(entry.name) + '</div>' +
+                        '<div class="file-size">' + (entry.is_dir ? '文件夹' : formatSize(entry.size)) + '</div>' +
+                        '</div>' +
+                        '<div class="file-actions">' +
+                        (entry.is_dir
+                            ? '<button class="btn btn-sm" data-open="' + esc(entry.name) + '">打开</button>'
+                            : '<button class="btn btn-sm btn-primary" data-download="' + esc(entry.name) + '">下载</button>') +
+                        '</div></div>';
+                }
+                html += '</div>';
+            }
+
+            app.innerHTML = html;
+
+            // Bind events
+            app.querySelectorAll('[data-download]').forEach(btn => {
+                btn.onclick = () => downloadFile(btn.dataset.download);
+            });
+            app.querySelectorAll('[data-open]').forEach(btn => {
+                btn.onclick = () => openSubdir(btn.dataset.open);
+            });
+            app.querySelectorAll('.file-name').forEach(el => {
+                el.onclick = () => {
+                    if (el.dataset.dir === 'true') openSubdir(el.dataset.name);
+                    else showInlinePreview(el.dataset.name, entries);
+                };
+            });
+            // Breadcrumb clicks
+            app.querySelectorAll('[data-crumb]').forEach(el => {
+                el.onclick = (e) => {
+                    e.preventDefault();
+                    navigateTo(el.dataset.crumb);
+                };
+            });
+            // Download all button
+            const btnAll = document.getElementById('btnDownloadAll');
+            if (btnAll) {
+                btnAll.onclick = () => downloadAll();
+            }
+        }
+
+        function renderFile(data) {
+            _entrySizes[data.name] = data.size;
+            const icon = getFileIcon(data.name, false);
+            const ext = (data.ext || '').toLowerCase();
+
+            let html = '<div class="share-header">' +
+                '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">' +
+                '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>' +
+                '<div><div class="share-title">' + esc(data.name) + '</div>' +
+                '<div class="share-meta">' + formatSize(data.size) + ' \u00B7 ' + (data.mime || ext) + '</div></div></div>';
+
+            html += '<div class="file-detail">' +
+                '<div class="icon">' + icon + '</div>' +
+                '<div class="name">' + esc(data.name) + '</div>' +
+                '<div class="size">' + formatSize(data.size) + '</div>' +
+                '<div class="actions">' +
+                '<button class="btn btn-primary" id="btnDownload">\u2B07 下载</button>';
+
+            if (canPreview(ext)) {
+                html += '<button class="btn" id="btnPreview">\uD83D\uDC41\uFE0F 预览</button>';
+            }
+
+            html += '</div></div>';
+
+            // Preview area
+            html += '<div class="preview-area" id="previewArea" style="display:none"></div>';
+
+            app.innerHTML = html;
+
+            document.getElementById('btnDownload').onclick = () => downloadFile(data.name);
+
+            const previewBtn = document.getElementById('btnPreview');
+            if (previewBtn) {
+                previewBtn.onclick = () => showPreview(data.name, ext, data.size);
+            }
+
+            // Auto-preview for images, SVG, PDF, Markdown
+            if (isPreviewableImage(ext) || isPreviewableSvg(ext) || isPreviewablePdf(ext) || isPreviewableMarkdown(ext)) {
+                showPreview(data.name, ext, data.size);
+            }
+        }
+
+        function showInlinePreview(name, entries) {
+            var ext = (name.split('.').pop() || '').toLowerCase();
+            if (!canPreview(ext)) {
+                downloadFile(name);
+                return;
+            }
+
+            // Build a file-detail view inline (replace directory content)
+            var entry = entries.find(function(e) { return e.name === name; });
+            var icon = getFileIcon(name, false);
+            var size = entry ? formatSize(entry.size) : '';
+
+            var html = '<div style="margin-bottom:12px"><button class="btn" id="btnBack">\u2190 返回列表</button></div>';
+
+            html += '<div class="share-header">' +
+                '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">' +
+                '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>' +
+                '<div><div class="share-title">' + esc(name) + '</div>' +
+                '<div class="share-meta">' + size + '</div></div></div>';
+
+            html += '<div class="file-detail">' +
+                '<div class="icon">' + icon + '</div>' +
+                '<div class="name">' + esc(name) + '</div>' +
+                '<div class="size">' + size + '</div>' +
+                '<div class="actions">' +
+                '<button class="btn btn-primary" id="btnDownload">\u2B07 下载</button>' +
+                '</div></div>';
+
+            html += '<div class="preview-area" id="previewArea" style="display:none"></div>';
+
+            app.innerHTML = html;
+
+            document.getElementById('btnBack').onclick = function() { renderDirectory({ entries: dirEntries, name: currentSubPath || currentPath || '分享文件' }); };
+            document.getElementById('btnDownload').onclick = function() { downloadFile(name); };
+
+            showPreview(name, ext, entry ? entry.size : 0);
+        }
+
+        // Markdown rendering: marked + DOMPurify (vendor: /static/vendor/)
+        var _markedReady = false;
+        function renderMarkdown(text) {
+            if (typeof marked === 'undefined') {
+                return '<pre class="preview-text">' + esc(text) + '</pre>';
+            }
+            if (!_markedReady) {
+                marked.use({
+                    breaks: true,
+                    renderer: {
+                        code: function(t) { return '<pre class="md-code-block"><code>' + esc(t.text) + '</code></pre>'; },
+                        codespan: function(t) { return '<code class="md-inline-code">' + esc(t.text) + '</code>'; },
+                        image: function(t) {
+                            var ti = t.title ? ' title="' + esc(t.title) + '"' : '';
+                            return '<img src="' + esc(t.href) + '" alt="' + esc(t.text) + '" class="md-image"' + ti + '>';
+                        }
+                    }
+                });
+                if (typeof DOMPurify !== 'undefined') {
+                    DOMPurify.addHook('afterSanitizeAttributes', function(node) {
+                        if (node.tagName === 'A') {
+                            node.setAttribute('target', '_blank');
+                            node.setAttribute('rel', 'noopener noreferrer');
+                        }
+                    });
+                }
+                _markedReady = true;
+            }
+
+            // Extract math formulas first
+            var mathBlocks = [];
+            var md = text.replace(/\$\$([\s\S]+?)\$\$/g, function(match, formula) {
+                var index = mathBlocks.length;
+                mathBlocks.push({ type: 'block', formula: formula.trim() });
+                return 'MATH_BLOCK_' + index + '_END';
+            });
+
+            // Inline math $...$
+            md = md.replace(/\$([^\$]+?)\$/g, function(match, formula) {
+                if (formula.trim() === '') return match;
+                var index = mathBlocks.length;
+                mathBlocks.push({ type: 'inline', formula: formula.trim() });
+                return 'MATH_INLINE_' + index + '_END';
+            });
+
+            var html = marked.parse(md);
+            if (typeof DOMPurify !== 'undefined') html = DOMPurify.sanitize(html);
+
+            // Restore math formulas with KaTeX
+            html = html.replace(/MATH_BLOCK_(\d+)_END/g, function(match, index) {
+                var math = mathBlocks[parseInt(index)];
+                if (typeof katex !== 'undefined') {
+                    try { return katex.renderToString(math.formula, { displayMode: true, throwOnError: false }); }
+                    catch (e) { return '<span class="math-error">' + esc(math.formula) + '</span>'; }
+                }
+                return '<span class="math-block">' + esc(math.formula) + '</span>';
+            });
+            html = html.replace(/MATH_INLINE_(\d+)_END/g, function(match, index) {
+                var math = mathBlocks[parseInt(index)];
+                if (typeof katex !== 'undefined') {
+                    try { return katex.renderToString(math.formula, { displayMode: false, throwOnError: false }); }
+                    catch (e) { return '<span class="math-error">' + esc(math.formula) + '</span>'; }
+                }
+                return '<span class="math-inline">' + esc(math.formula) + '</span>';
+            });
+
+            return html;
+        }
+
+        function showPreview(name, ext, size) {
+            var area = document.getElementById('previewArea');
+            if (!area) return;
+            area.style.display = 'block';
+
+            // 大文本不做预览: 全量拉取+渲染会卡死主线程, 直接引导下载 (md 渲染 DOM 膨胀大, 阈值更严; HTML 渲染走 iframe 异步解析, 放宽)
+            size = size || 0;
+            var tooLargeLimit = isPreviewableMarkdown(ext) ? LIMIT_MD
+                : (isPreviewableHtml(ext) ? LIMIT_HTML
+                : (isPreviewableSvg(ext) || isPreviewableText(ext) ? LIMIT_TEXT : 0));
+            if (size > tooLargeLimit) {
+                area.innerHTML = '<div style="padding:40px 20px;text-align:center">' +
+                    '<p style="font-weight:600;margin-bottom:8px">文件过大，已停用在线预览</p>' +
+                    '<p style="color:var(--text-tertiary);font-size:13px;margin-bottom:16px">预览大文本会导致页面卡顿，请下载后查看</p>' +
+                    '<button class="btn btn-primary" id="btnTooLargeDownload">下载文件</button></div>';
+                document.getElementById('btnTooLargeDownload').onclick = function() { downloadFile(name); };
+                return;
+            }
+
+            // Tear down a previous custom video player (frees its listeners)
+            if (window._sharePlayer) { try { window._sharePlayer.destroy(); } catch (e) {} window._sharePlayer = null; }
+
+            var fileUrl = '/s/' + shareId + '?download=1&name=' + encodeURIComponent(name);
+            if (currentSubPath) fileUrl += '&sub_path=' + encodeURIComponent(currentSubPath);
+            if (currentPassword) fileUrl += '&password=' + encodeURIComponent(currentPassword);
+
+            // Image
+            if (isPreviewableImage(ext)) {
+                area.innerHTML = '<div style="text-align:center;padding:8px"><img src="' + fileUrl + '" alt="' + esc(name) + '" style="max-width:100%"></div>';
+                return;
+            }
+
+            // SVG — inline render
+            if (isPreviewableSvg(ext)) {
+                area.innerHTML = '<div class="loading"><div class="spinner"></div> 加载预览...</div>';
+                fetch(fileUrl).then(function(r) { return r.text(); }).then(function(text) {
+                    area.innerHTML = '<div style="text-align:center;padding:16px;background:#fff">' + text + '</div>';
+                }).catch(function() {
+                    area.innerHTML = '<img src="' + fileUrl + '" alt="' + esc(name) + '" style="max-width:100%">';
+                });
+                return;
+            }
+
+            // Video — custom player (Bilibili-style skin + gestures + resolution)
+            if (isPreviewableVideo(ext)) {
+                area.innerHTML = '<div class="vp-host"></div>';
+                var qbase = '/s/' + shareId + '?name=' + encodeURIComponent(name);
+                if (currentSubPath) qbase += '&sub_path=' + encodeURIComponent(currentSubPath);
+                if (currentPassword) qbase += '&password=' + encodeURIComponent(currentPassword);
+                window._sharePlayer = VideoPlayer.create(area.querySelector('.vp-host'), fileUrl, {
+                    onDownload: function () { downloadFile(name); },
+                    quality: {
+                        fetchOptions: function () {
+                            return fetch(qbase + '&qualities=1').then(function (r) { return r.json(); })
+                                .then(function (d) { return (d && d.options) || []; }).catch(function () { return []; });
+                        },
+                        srcFor: function (v) { return v === 'original' ? fileUrl : (qbase + '&download=1&quality=' + v); },
+                        prepare: function (v) {
+                            return fetch(qbase + '&prepare=1&quality=' + v).then(function (r) { return r.json(); })
+                                .catch(function () { return { status: 'failed', error: '网络错误' }; });
+                        }
+                    }
+                });
+                return;
+            }
+
+            // Audio — custom player card
+            if (isPreviewableAudio(ext)) {
+                area.innerHTML = '<div class="vp-host" style="padding:16px 8px"></div>';
+                window._sharePlayer = AudioPlayer.create(area.querySelector('.vp-host'), fileUrl, { title: name, onDownload: function () { downloadFile(name); } });
+                return;
+            }
+
+            // PDF
+            if (isPreviewablePdf(ext)) {
+                area.innerHTML = '<iframe src="' + fileUrl + '" style="width:100%;height:600px;border:none"></iframe>';
+                return;
+            }
+
+            // Markdown
+            if (isPreviewableMarkdown(ext)) {
+                area.innerHTML = '<div class="loading"><div class="spinner"></div> 加载预览...</div>';
+                fetch(fileUrl).then(function(r) { return r.text(); }).then(function(text) {
+                    var rendered = renderMarkdown(text);
+                    area.innerHTML = '<div class="preview-markdown">' + rendered + '</div>';
+                    // Apply syntax highlighting to code blocks
+                    if (window.HljsAsync) {
+                        area.querySelectorAll('pre code').forEach(function(block) {
+                            if (!block.classList.contains('md-inline-code')) {
+                                var m = block.className.match(/language-([\w+-]+)/);
+                                HljsAsync.highlight(block, m ? m[1] : null, block.textContent);
+                            }
+                        });
+                    }
+                    // Render math with KaTeX
+                    if (window.renderMathInElement) {
+                        renderMathInElement(area, { delimiters: [
+                            {left: '$$', right: '$$', display: true},
+                            {left: '$', right: '$', display: false}
+                        ]});
+                    }
+                }).catch(function() {
+                    area.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-tertiary)">预览加载失败</div>';
+                });
+                return;
+            }
+
+            // HTML — sandboxed iframe
+            if (isPreviewableHtml(ext)) {
+                area.innerHTML = '<div class="loading"><div class="spinner"></div> 加载预览...</div>';
+                fetch(fileUrl).then(function(r) { return r.text(); }).then(function(text) {
+                    // 源码视图属于文本阅读: 超过文本上限 (1MB) 直接不提供入口, 只留 iframe 渲染
+                    var hasSource = text.length <= 1024 * 1024;
+                    area.innerHTML =
+                        (hasSource ? '<div style="padding:8px;text-align:right">' +
+                        '<button class="btn" id="btnToggleHtmlSource" style="font-size:12px">查看源码</button></div>' : '') +
+                        '<iframe sandbox="allow-scripts" class="preview-html-frame" style="width:100%;height:500px;border:none"></iframe>' +
+                        (hasSource ? '<pre class="preview-html-source" style="display:none"><code class="language-html"></code></pre>' : '');
+                    // 大文件不能拼进 innerHTML 的 srcdoc 属性（父页解析器卡死），插入后赋值交给子框架异步解析
+                    area.querySelector('.preview-html-frame').srcdoc = '<!DOCTYPE html>' + text;
+                    var tbtn = document.getElementById('btnToggleHtmlSource');
+                    if (tbtn) tbtn.onclick = function() {
+                        var frame = area.querySelector('.preview-html-frame');
+                        var source = area.querySelector('.preview-html-source');
+                        if (frame.style.display === 'none') {
+                            frame.style.display = '';
+                            source.style.display = 'none';
+                            this.textContent = '查看源码';
+                            // 重载 iframe 内容 (切到源码视图时被清空以停掉子框架脚本)
+                            if (!frame.getAttribute('srcdoc')) frame.srcdoc = '<!DOCTYPE html>' + text;
+                        } else {
+                            frame.style.display = 'none';
+                            source.style.display = '';
+                            this.textContent = '渲染预览';
+                            // 卸载 iframe 内容: iframe 脚本即使 display:none 也在主线程跑, 手机上会冻结页面
+                            try { frame.srcdoc = ''; } catch (e) {}
+                            var code = source.querySelector('code');
+                            // 源码懒填充 + 显示层截断
+                            if (code && !code.textContent) code.textContent = text.length > LIMIT_DISPLAY ? text.slice(0, LIMIT_DISPLAY) + '\n\n… 已截断，完整内容请下载查看' : text;
+                            // 源码高亮在 Worker 线程扫描, 大文本也不卡主线程
+                            if (window.HljsAsync) {
+                                source.querySelectorAll('code').forEach(function(block) {
+                                    HljsAsync.highlight(block, 'html', block.textContent);
+                                });
+                            }
+                        }
+                    };
+                }).catch(function() {
+                    area.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-tertiary)">预览加载失败</div>';
+                });
+                return;
+            }
+
+            // Text / Code
+            if (isPreviewableText(ext)) {
+                area.innerHTML = '<div class="loading"><div class="spinner"></div> 加载预览...</div>';
+                fetch(fileUrl).then(function(r) { return r.text(); }).then(function(text) {
+                    // 显示层截断: 只渲染前 128KB, 保证预览绝对流畅, 完整内容下载查看
+                    var shown = text.length > LIMIT_DISPLAY ? text.slice(0, LIMIT_DISPLAY) : text;
+                    var note = text.length > LIMIT_DISPLAY ? '<div style="padding:10px 12px;font-size:12px;color:var(--text-tertiary);border-top:1px solid var(--border-color);text-align:center">内容过长，已仅显示前 ' + (LIMIT_DISPLAY / 1024) + ' KB · 完整内容请下载查看</div>' : '';
+                    var escaped = esc(shown);
+                    var lang = hljsLangMap[ext] || ext || 'text';
+                    area.innerHTML = '<pre style="margin:0;padding:16px;overflow:auto;max-height:500px;font-size:13px;line-height:1.5"><code class="language-' + lang + '">' + escaped + '</code></pre>' + note;
+                    if (window.HljsAsync) {
+                        var code = area.querySelector('code');
+                        if (code) HljsAsync.highlight(code, lang, code.textContent);
+                    }
+                }).catch(function() {
+                    area.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-tertiary)">预览加载失败</div>';
+                });
+                return;
+            }
+        }
+
+        // Download with debouncing
+        const _downloadLocks = {};
+        const _entrySizes = {}; // 记录当前列表中各文件大小, 大文件走分片续传下载
+
+        // 分片续传下载 (免费版服务端 Range 窗口封顶 512KB, 逐段拼装)
+        async function downloadChunked(name, url, size) {
+            const parts = [];
+            let start = 0;
+            while (start < size) {
+                let buf = null, end = -1;
+                // 长链路串行请求会被边缘掐断, 每段自动重试
+                for (let attempt = 0; ; attempt++) {
+                    try {
+                        const res = await fetch(url, { headers: { Range: 'bytes=' + start + '-' } });
+                        if (res.status !== 206 && !res.ok) throw new Error('HTTP ' + res.status);
+                        buf = await res.arrayBuffer();
+                        if (!buf.byteLength) throw new Error('空响应');
+                        const cr = res.headers.get('Content-Range'); // bytes s-e/total
+                        if (!cr) throw new Error('缺少 Content-Range');
+                        const seg = cr.split(/[-/ ]/); // [bytes, start, end, total]
+                        if (parseInt(seg[1], 10) !== start) throw new Error('范围错位');
+                        end = parseInt(seg[2], 10);
+                        break;
+                    } catch (e) {
+                        if (attempt >= 4) throw new Error('下载中断 (bytes=' + start + ', ' + e.message + ')');
+                        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+                    }
+                }
+                parts.push(buf);
+                start = end + 1;
+            }
+            const blob = new Blob(parts);
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = name;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+        }
+
+        function downloadFile(name) {
+            if (_downloadLocks[name]) return;
+            _downloadLocks[name] = true;
+
+            // name is just the filename; backend resolves via sub_path
+            let url = '/s/' + shareId + '?download=1&name=' + encodeURIComponent(name);
+            if (currentSubPath) url += '&sub_path=' + encodeURIComponent(currentSubPath);
+            if (currentPassword) url += '&password=' + encodeURIComponent(currentPassword);
+
+            const size = _entrySizes[name];
+            if (size && size > 4 * 1024 * 1024) {
+                downloadChunked(name, url, size).catch(function(e) { Dialog.alert(e.message || '下载失败'); });
+                return;
+            }
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = name;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            // Disable download buttons for this file
+            app.querySelectorAll('[data-download="' + CSS.escape(name) + '"]').forEach(btn => {
+                btn.disabled = true;
+                btn.textContent = '下载中...';
+            });
+            const mainBtn = document.getElementById('btnDownload');
+            if (mainBtn) { mainBtn.disabled = true; mainBtn.textContent = '下载中...'; }
+
+            // Re-enable after 2 seconds
+            setTimeout(() => {
+                delete _downloadLocks[name];
+                app.querySelectorAll('[data-download="' + CSS.escape(name) + '"]').forEach(btn => {
+                    btn.disabled = false;
+                    btn.textContent = '下载';
+                });
+                if (mainBtn) { mainBtn.disabled = false; mainBtn.textContent = '\u2B07 下载'; }
+            }, 2000);
+        }
+
+        function openSubdir(name) {
+            const newPath = currentSubPath ? currentSubPath + '/' + name : name;
+            navigateTo(newPath);
+        }
+
+        async function navigateTo(subPath) {
+            currentSubPath = subPath;
+            app.innerHTML = '<div class="loading"><div class="spinner"></div> 加载中...</div>';
+            try {
+                const data = await fetchData(subPath, currentPassword);
+                if (data.error) {
+                    showError(data.error);
+                    return;
+                }
+                if (data.type === 'directory') {
+                    renderDirectory(data);
+                } else {
+                    renderFile(data);
+                }
+            } catch (e) {
+                showError('加载失败', e.message);
+            }
+        }
+
+        function downloadAll() {
+            let url = '/s/' + shareId + '?download=zip';
+            if (currentSubPath) url += '&sub_path=' + encodeURIComponent(currentSubPath);
+            if (currentPassword) url += '&password=' + encodeURIComponent(currentPassword);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = '';
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        async function load() {
+            app.innerHTML = '<div class="loading"><div class="spinner"></div> 加载中...</div>';
+            try {
+                const data = await fetchData(currentSubPath, currentPassword);
+                if (data.need_password) {
+                    showPasswordForm();
+                    return;
+                }
+                if (data.error) {
+                    showError(data.error);
+                    return;
+                }
+                currentPath = data.path || '';
+                if (data.type === 'directory') {
+                    renderDirectory(data);
+                } else {
+                    renderFile(data);
+                }
+                // Update page title
+                document.title = (data.name || '分享文件') + ' - 文件分享';
+            } catch (e) {
+                if (e.message.includes('密码')) {
+                    showPasswordForm(e.message);
+                } else {
+                    showError('加载失败', e.message);
+                }
+            }
+        }
+
+        // Init
+        if (!shareId) {
+            showError('无效的分享链接');
+        } else {
+            load();
+        }
+    })();
+    </script>
+</body>
+</html>

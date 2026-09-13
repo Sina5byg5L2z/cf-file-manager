@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="color-scheme" content="dark">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/png/files-32.png">
+    <link rel="icon" type="image/png" sizes="256x256" href="/static/png/files-256.png">
+    <link rel="apple-touch-icon" href="/static/png/files-256.png">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Manager - Login</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="login-body">
+    <div class="login-container">
+        <div class="login-card">
+            <div class="login-header">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="color:var(--accent)" stroke-width="2">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                </svg>
+                <h1>File Manager</h1>
+            </div>
+            <form id="loginForm">
+                <div class="form-group">
+                    <label for="username">用户名</label>
+                    <input type="text" id="username" name="username" placeholder="用户名" autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="password">密码</label>
+                    <input type="password" id="password" name="password" placeholder="输入密码" autofocus autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">登录</button>
+                <div id="loginError" class="error-msg" style="display:none"></div>
+            </form>
+        </div>
+    </div>
+    <script>
+        // If already logged in, redirect
+        const token = localStorage.getItem('token');
+        if (token) {
+            fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } })
+                .then(r => { if (r.ok) window.location.href = '/app'; })
+                .catch(() => {});
+        }
+
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const errEl = document.getElementById('loginError');
+            errEl.style.display = 'none';
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    localStorage.setItem('token', data.token);
+                    localStorage.setItem('username', data.username);
+                    window.location.href = '/app';
+                } else {
+                    errEl.textContent = data.error || '登录失败';
+                    errEl.style.display = 'block';
+                }
+            } catch (err) {
+                errEl.textContent = '网络错误';
+                errEl.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>
