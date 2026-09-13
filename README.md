@@ -15,7 +15,7 @@
 
 ## 设计要点（面向 Cloudflare 免费额度）
 
-- 不使用 KV、不使用 R2：元数据与文件内容（1MB 分片 BLOB）全部存 D1（额度更高）
+- 不使用 KV、不使用 R2（无需绑定银行卡）：元数据与文件内容（1MB 分片 BLOB）全部存 D1（额度更高）
 - 大文件可选转存 [Backblaze B2](https://www.backblazeb2.com/)（配置 secrets 即启用），未配置时走 D1
 - 公开图片 `/i/*`、私有预览 / 下载、目录列表、分享元数据全部走边缘 Cache API，命中时 0 次 D1 读取；`immutable` 缓存头让浏览器也不再回源
 - 分片上传直接写暂存区，complete 时单条 `INSERT..SELECT` 合并，写放大最小
