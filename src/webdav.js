@@ -40,22 +40,24 @@ async function checkBasicAuth(req, env, db) {
 }
 
 export async function webdavHandler(req, env, db, relPath) {
+  const method = req.method;
+  // OPTIONS 必须免认证: Windows WebClient 挂载前先发未认证的 OPTIONS 探测 DAV 支持
+  if (method === 'OPTIONS') {
+    return new Response(null, {
+      headers: {
+        Allow: 'OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND',
+        DAV: '1',
+        'MS-Author-Via': 'DAV',
+      },
+    });
+  }
   if (!(await checkBasicAuth(req, env, db))) {
     return new Response(null, { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="File Manager"' } });
   }
 
   const clean = sanitizeRel(decodeURIComponent(relPath || ''));
-  const method = req.method;
 
   switch (method) {
-    case 'OPTIONS':
-      return new Response(null, {
-        headers: {
-          Allow: 'OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND',
-          DAV: '1',
-          'MS-Author-Via': 'DAV',
-        },
-      });
     case 'PROPFIND': return propfind(db, clean);
     case 'GET': {
       if (!clean) return propfind(db, '');
