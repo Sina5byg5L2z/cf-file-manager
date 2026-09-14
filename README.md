@@ -12,6 +12,7 @@
 - **分享链接**：可选密码（PBKDF2 哈希存储）+ 过期时间 + 访问计数
 - **WebDAV**：`/dav` 路径可直接挂载为本地磁盘（RaiDrive / Cyberduck 等客户端）
 - **单用户认证**：JWT 登录，PBKDF2 密码哈希，页面内「账号设置」可修改用户名与密码
+- **参数设置**：分片规则、上传上限、预览上限页面内可视化调整，按移动端 / 电脑端两档分别生效
 
 ## 设计要点（面向 Cloudflare 免费额度）
 
@@ -87,6 +88,21 @@ npm run dev                            # http://localhost:8787
 
 首次登录时若用户表为空，会自动从 secrets 播种账号；之后修改用户名 / 密码请直接用页面内「账号设置」（改完 secrets 可删除）。
 
+## 参数设置
+
+登录后点击顶栏齿轮图标打开「参数设置」。配置存 D1（`app_settings` 表，缺表自动创建），所有设备共享一份；每项分「移动端 / 电脑端」两档，运行时按当前设备类型自动取对应档位。
+
+| 项 | 说明 | 默认值（移动端 / 电脑端） |
+|---|---|---|
+| 分片规则 | 按文件大小区间匹配（先命中先用，可拖动排序），指定分片大小与并发数；未命中走 DEFAULT 行 | DEFAULT：512KB × 4 并发 |
+| 上传上限 | 单文件大小上限，超限文件上传时直接跳过；不能超过服务端 `MAX_UPLOAD_SIZE`（那是最终兜底） | 200MB / 200MB |
+| 预览上限 | 文本 / 代码、Markdown、HTML 超过上限不做在线预览，引导下载 | 512KB / 1MB、256KB / 512KB、1MB / 5MB |
+
+说明：
+
+- 分片大小仅允许 64KB / 128KB / 256KB / 512KB / 1MB（服务端合并分片时需按 `(文件大小, 分片数)` 反推分片大小，集合外的值会导致推导失败）
+- 若上传触发 Cloudflare `exceededResources`（1102）或 503，把分片大小调回 256KB 即可
+
 ## 目录结构
 
 ```
@@ -96,6 +112,7 @@ src/         Worker 后端（纯原生 fetch handler，无框架）
   imagehost.js 图床
   share.js     分享链接
   webdav.js    WebDAV 服务端
+  settings.js  应用参数设置（分片规则 / 上传与预览上限，D1 单行存储）
 public/      前端（原生 JS；vendored: marked / DOMPurify / KaTeX / highlight.js）
 tools/       hash-password.mjs 密码哈希生成；build-fileicons.mjs 文件图标构建
 schema.sql   D1 建表脚本
