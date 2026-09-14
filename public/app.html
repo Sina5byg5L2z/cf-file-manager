@@ -60,6 +60,12 @@
                 </svg>
             </button>
             <button id="btnImageHost" class="btn btn-sm" title="图床管理">📷</button>
+            <button id="btnSettings" class="btn btn-sm" title="参数设置">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                </svg>
+            </button>
             <span id="usernameDisplay" class="username"></span>
             <button id="btnAccount" class="btn btn-sm" title="账号设置">👤</button>
             <button id="btnLogout" class="btn btn-sm btn-danger" title="退出">退出</button>
@@ -278,6 +284,59 @@
         </div>
     </div>
 
+    <!-- Parameter settings modal -->
+    <div class="modal-overlay" id="settingsModal" style="display:none">
+        <div class="modal" style="max-width:560px">
+            <div class="modal-header">
+                <span>参数设置</span>
+                <button class="modal-close" id="btnCloseSettings">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="settings-group">分片规则（按文件大小先命中先用，可拖动排序）</div>
+                <div class="chunk-rule-head">
+                    <span></span><span>文件范围</span><span>分片</span><span>并发</span><span></span>
+                </div>
+                <div id="chunkRules"></div>
+                <div id="chunkDefault" class="chunk-rule-row chunk-rule-default"></div>
+                <button type="button" id="btnAddRule" class="rule-add">＋ 添加规则</button>
+                <div class="form-row2">
+                    <div class="form-group">
+                        <label>移动端上传上限 (MB)</label>
+                        <input type="number" id="setUploadMobile" min="1" step="1">
+                    </div>
+                    <div class="form-group">
+                        <label>电脑端上传上限 (MB)</label>
+                        <input type="number" id="setUploadDesktop" min="1" step="1">
+                    </div>
+                </div>
+                <div class="settings-group">预览上限 (MB，超出则引导下载)</div>
+                <div class="settings-grid">
+                    <div class="settings-grid-head"><span></span><span>移动端</span><span>电脑端</span></div>
+                    <div class="settings-grid-row">
+                        <span class="settings-grid-label">文本 / 代码</span>
+                        <input type="number" id="set_preview_text_mobile" min="0.0625" step="0.0625">
+                        <input type="number" id="set_preview_text_desktop" min="0.0625" step="0.0625">
+                    </div>
+                    <div class="settings-grid-row">
+                        <span class="settings-grid-label">Markdown</span>
+                        <input type="number" id="set_preview_markdown_mobile" min="0.0625" step="0.0625">
+                        <input type="number" id="set_preview_markdown_desktop" min="0.0625" step="0.0625">
+                    </div>
+                    <div class="settings-grid-row">
+                        <span class="settings-grid-label">HTML</span>
+                        <input type="number" id="set_preview_html_mobile" min="0.0625" step="0.0625">
+                        <input type="number" id="set_preview_html_desktop" min="0.0625" step="0.0625">
+                    </div>
+                </div>
+                <div class="settings-hint">设置对所有设备生效；各设备按自身类型自动取对应档位。<span id="setDeviceHint"></span></div>
+                <div id="setError" class="error-msg" style="display:none"></div>
+            </div>
+            <div style="padding:12px 20px 20px;text-align:right">
+                <button id="btnSetSave" class="btn btn-primary">保存</button>
+            </div>
+        </div>
+    </div>
+
     <script src="/static/vendor/katex/katex@0.16.9.min.js"></script>
     <script src="/static/vendor/hljs/highlight@11.9.0.min.js"></script>
     <script src="/static/js/hljs-async.js?v=20260912d"></script>
@@ -285,6 +344,7 @@
     <script src="/static/vendor/purify@3.4.15.min.js"></script>
     <script src="/static/js/dialog.js"></script>
     <script src="/static/js/api.js"></script>
+    <script src="/static/js/settings.js?v=20260914f"></script>
     <script src="/static/js/player.js?v=20260913b"></script>
     <script src="/static/js/fileicons.js?v=b200724b"></script>
     <script src="/static/js/filemanager.js"></script>

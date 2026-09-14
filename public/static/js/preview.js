@@ -50,12 +50,12 @@ const Preview = {
     },
 
     // 大文本预览上限: 超限不做预览, 直接引导下载 (流畅优先; 全量拉取+渲染会卡死主线程)
-    // md 512KB: marked+KaTeX 渲染后 DOM 膨胀数倍, 阈值更严; 纯文本/代码 1MB: innerHTML 一次构建仍流畅
-    // HTML 5MB: 渲染走 iframe 子框架异步解析, 不占主线程, 只受内存约束;
+    // 数值在「参数设置」中按移动端/电脑端分别配置 (AppSettings, 服务端下发), 这里只兜底
+    // md 阈值更严: marked+KaTeX 渲染后 DOM 膨胀数倍; HTML 走 iframe 子框架异步解析可放宽;
     // 查看源码视图是单文本节点 textContent, 同样安全 (源码高亮由 HljsAsync 的 200KB 结果 DOM guard 拦截)
-    TEXT_PREVIEW_LIMIT: IS_MOBILE ? 512 * 1024 : 1024 * 1024,
-    MARKDOWN_PREVIEW_LIMIT: IS_MOBILE ? 256 * 1024 : 512 * 1024,
-    HTML_PREVIEW_LIMIT: IS_MOBILE ? 1024 * 1024 : 5 * 1024 * 1024,
+    get TEXT_PREVIEW_LIMIT() { return AppSettings.previewLimit('preview_text'); },
+    get MARKDOWN_PREVIEW_LIMIT() { return AppSettings.previewLimit('preview_markdown'); },
+    get HTML_PREVIEW_LIMIT() { return AppSettings.previewLimit('preview_html'); },
     // 显示层截断: 预览内文本只渲染前一小段 (保证渲染/滚动绝对流畅), 完整内容下载查看
     TEXT_DISPLAY_LIMIT: IS_MOBILE ? 64 * 1024 : 128 * 1024,
 

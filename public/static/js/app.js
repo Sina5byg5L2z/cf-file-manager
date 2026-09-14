@@ -19,6 +19,10 @@
     Upload.init();
     Preview.init();
     Share.init();
+    SettingsUI.init();
+
+    // 应用参数设置: 异步加载 (加载完成前用内置默认值兜底)
+    AppSettings.load();
 
     // Navigate to root
     FM.navigate('');

@@ -3,9 +3,8 @@
 // 256K/512K 全部并发(4/6/8)通过; 1M×4 通过; 1M×6/8 触发 exceededResources(1102)。
 // 并发下 CPU 记账被放大(孤立请求真实 ~1-3ms),限流执行阈值高于名义 10ms。
 // 历史注释中 8并发×512KB 触发 1102 为偶发，真实存在但测试未复现。
-// 若复现 1102/503 请降回 256KB
-const CHUNK_SIZE = 512 * 1024; // 512KB
-const CONCURRENT = 4; // parallel chunk uploads
+// 分片大小/并发数已改为"参数设置"可调 (AppSettings, 服务端下发), 默认 512KB×4
+// 若复现 1102/503 请在设置中降回 256KB
 
 // ---- 缩略图生成 (前端 canvas, 服务端零 CPU) ----
 // 仅浏览器可解码的格式: 图片全部尝试; 视频仅 mp4/m4v/mov/webm/mkv
@@ -68,6 +67,17 @@ const Upload = {
     closeTimer: null,
 
     uploadFiles(fileList, path) {
+        // 单文件上限按当前设备类型取对应档位 (服务端 MAX_UPLOAD_SIZE 是最终兜底)
+        const limit = AppSettings.uploadLimit();
+        const oversized = [...fileList].filter(f => f.size > limit);
+        const files = [...fileList].filter(f => f.size <= limit);
+        if (oversized.length) {
+            const names = oversized.map(f => f.name).join('、');
+            const mb = Math.round(limit / 1048576 * 100) / 100;
+            Dialog.alert(`${names} 超过当前设备上传上限 (${mb} MB)，已跳过。可在「参数设置」中调整。`, { title: '文件过大' });
+        }
+        if (!files.length) return;
+
         const list = document.getElementById('uploadList');
         const progress = document.getElementById('uploadProgress');
         list.innerHTML = '';
@@ -75,10 +85,12 @@ const Upload = {
         progress.style.display = 'block';
         if (this.closeTimer) { clearTimeout(this.closeTimer); this.closeTimer = null; }
 
-        for (const file of fileList) {
+        for (const file of files) {
             const id = Date.now() + Math.random();
-            const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-            const task = { id, name: file.name, file, path, progress: 0, paused: false, aborted: false, uploadId: null, totalChunks, sentChunks: 0, failed: false, chunkSize: CHUNK_SIZE, timeoutRetries: 0 };
+            // 按文件大小命中分片规则 (先命中先用, 未命中走 DEFAULT)
+            const rule = AppSettings.chunkRuleFor(file.size);
+            const totalChunks = Math.max(1, Math.ceil(file.size / rule.chunk_size));
+            const task = { id, name: file.name, file, path, progress: 0, paused: false, aborted: false, uploadId: null, totalChunks, sentChunks: 0, failed: false, chunkSize: rule.chunk_size, concurrent: rule.concurrent, timeoutRetries: 0 };
             this.tasks.push(task);
             this.renderItem(list, task);
             this.doUpload(task);
@@ -202,7 +214,7 @@ const Upload = {
 
                 // Collect up to CONCURRENT pending chunks
                 const batch = [];
-                for (let i = 0; i < task.totalChunks && batch.length < CONCURRENT; i++) {
+                for (let i = 0; i < task.totalChunks && batch.length < task.concurrent; i++) {
                     if (!task.received[i] && !task.inflight.has(i)) {
                         task.inflight.add(i);
                         batch.push(i);

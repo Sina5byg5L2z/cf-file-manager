@@ -47,6 +47,10 @@ const API = {
         return this.json('POST', '/api/account/username', { new_username: newUsername });
     },
 
+    // App parameter settings (chunk size / concurrency / per-device limits)
+    getSettings() { return this.json('GET', '/api/settings'); },
+    saveSettings(settings) { return this.json('PUT', '/api/settings', settings); },
+
     // Files
     listFiles(path = '') {
         return this.json('GET', `/api/files?path=${encodeURIComponent(path)}`);

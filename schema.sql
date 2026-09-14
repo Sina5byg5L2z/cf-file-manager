@@ -56,6 +56,13 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
   created_at   INTEGER NOT NULL
 );
 
+-- 应用参数设置（单行, key='ui', value=JSON; 由页面"参数设置"维护: 分片大小/
+-- 并发数/移动端与电脑端的上传与预览大小上限。缺省值在 src/settings.js 中兜底）
+CREATE TABLE IF NOT EXISTS app_settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 -- 登录用户（单用户系统, id 恒为 1; 可在页面"账号设置"中修改用户名与密码;
 -- 首次登录时若表为空, 自动从 env secret AUTH_PASSWORD_HASH/AUTH_PASSWORD 播种）
 CREATE TABLE IF NOT EXISTS users (

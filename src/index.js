@@ -9,6 +9,7 @@ import * as vfs from './vfs.js';
 import * as ih from './imagehost.js';
 import * as share from './share.js';
 import * as dav from './webdav.js';
+import * as settings from './settings.js';
 
 export default {
   async fetch(request, env, ctx) {
@@ -74,6 +75,9 @@ async function route(request, env, ctx) {
     if (path === '/app') return assets(request, env, '/app.html');
   }
 
+  // ---------- 应用参数设置读取 (公开: 仅 UI 参数, 无敏感信息; 分享页未登录也要用) ----------
+  if (path === '/api/settings' && method === 'GET') return settings.getSettings(request, env, db);
+
   // ---------- 以下 API 均需 JWT ----------
   // 表单提交的打包下载无法携带 Authorization 头, 由 handler 校验表单 token 字段
   const isFormBatchDl = path === '/api/files/batch-download' && method === 'POST'
@@ -86,6 +90,9 @@ async function route(request, env, ctx) {
   // 账号设置 (改用户名/密码)
   if (path === '/api/account/password' && method === 'POST') return auth.changePassword(request, env, db);
   if (path === '/api/account/username' && method === 'POST') return auth.changeUsername(request, env, db);
+
+  // 应用参数设置保存 (读取在上面公开区)
+  if (path === '/api/settings' && method === 'PUT') return settings.saveSettings(request, env, db);
 
   // 文件管理器
   if (path === '/api/files' && method === 'GET') return vfs.listFiles(request, env, db, url);

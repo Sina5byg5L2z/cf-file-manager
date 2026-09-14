@@ -141,6 +141,7 @@
     <script src="/static/js/hljs-async.js?v=20260912d"></script>
     <script src="/static/vendor/marked@15.0.12.min.js"></script>
     <script src="/static/vendor/purify@3.4.15.min.js"></script>
+    <script src="/static/js/settings.js?v=20260914a"></script>
     <script>
     (function() {
         const shareId = window.location.pathname.split('/s/')[1]?.split('?')[0]?.split('/')[0] || '';
@@ -150,13 +151,12 @@
         let currentSubPath = '';
         let dirEntries = []; // cached for inline preview back navigation
 
-        // 预览阈值: 移动端内存/CPU 更紧, 全面收紧 (文本显示链路; 渲染预览 iframe 是独立异步链路)
+        // 预览阈值: 与管理页「参数设置」共用服务端配置 (AppSettings 按移动端/电脑端取对应档位)
+        // 这里只保留显示层截断常量 (设备固有, 不在设置面板)
         const IS_MOBILE = /Mobi|Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)
             || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
-        const LIMIT_MD = IS_MOBILE ? 256 * 1024 : 512 * 1024;
-        const LIMIT_HTML = IS_MOBILE ? 1024 * 1024 : 5 * 1024 * 1024;
-        const LIMIT_TEXT = IS_MOBILE ? 512 * 1024 : 1024 * 1024;
         const LIMIT_DISPLAY = IS_MOBILE ? 64 * 1024 : 128 * 1024;
+        AppSettings.load();
 
         function esc(s) {
             const d = document.createElement('div');
@@ -543,16 +543,21 @@
             return html;
         }
 
+        // 设置异步加载: 先等加载完再判断阈值, 避免首屏用默认值误判 (所有调用点共用此入口)
         function showPreview(name, ext, size) {
+            AppSettings.ready.then(function () { _showPreview(name, ext, size); });
+        }
+
+        function _showPreview(name, ext, size) {
             var area = document.getElementById('previewArea');
             if (!area) return;
             area.style.display = 'block';
 
             // 大文本不做预览: 全量拉取+渲染会卡死主线程, 直接引导下载 (md 渲染 DOM 膨胀大, 阈值更严; HTML 渲染走 iframe 异步解析, 放宽)
             size = size || 0;
-            var tooLargeLimit = isPreviewableMarkdown(ext) ? LIMIT_MD
-                : (isPreviewableHtml(ext) ? LIMIT_HTML
-                : (isPreviewableSvg(ext) || isPreviewableText(ext) ? LIMIT_TEXT : 0));
+            var tooLargeLimit = isPreviewableMarkdown(ext) ? AppSettings.previewLimit('preview_markdown')
+                : (isPreviewableHtml(ext) ? AppSettings.previewLimit('preview_html')
+                : (isPreviewableSvg(ext) || isPreviewableText(ext) ? AppSettings.previewLimit('preview_text') : 0));
             if (size > tooLargeLimit) {
                 area.innerHTML = '<div style="padding:40px 20px;text-align:center">' +
                     '<p style="font-weight:600;margin-bottom:8px">文件过大，已停用在线预览</p>' +
@@ -654,8 +659,8 @@
             if (isPreviewableHtml(ext)) {
                 area.innerHTML = '<div class="loading"><div class="spinner"></div> 加载预览...</div>';
                 fetch(fileUrl).then(function(r) { return r.text(); }).then(function(text) {
-                    // 源码视图属于文本阅读: 超过文本上限 (1MB) 直接不提供入口, 只留 iframe 渲染
-                    var hasSource = text.length <= 1024 * 1024;
+                    // 源码视图属于文本阅读: 超过文本上限直接不提供入口, 只留 iframe 渲染
+                    var hasSource = text.length <= AppSettings.previewLimit('preview_text');
                     area.innerHTML =
                         (hasSource ? '<div style="padding:8px;text-align:right">' +
                         '<button class="btn" id="btnToggleHtmlSource" style="font-size:12px">查看源码</button></div>' : '') +
