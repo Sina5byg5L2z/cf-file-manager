@@ -261,6 +261,8 @@ const SettingsUI = {
         this._mb('setDownloadRange').value = String(Math.round(AppSettings.downloadRange() / 1048576 * 100) / 100);
         document.getElementById('setError').style.display = 'none';
         this.modal.style.display = 'flex';
+        // 存储分库面板 (库清单 / 名额 / 一键扩容) 随设置弹窗一起加载
+        if (window.StorageUI) StorageUI.loadPanel();
     },
 
     collectRules() {

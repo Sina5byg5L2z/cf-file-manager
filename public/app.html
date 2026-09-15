@@ -20,7 +20,7 @@
             } catch (e) { /* 隐私模式等场景下保持默认暗色 */ }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260915g">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260915j">
     <link rel="stylesheet" href="/static/vendor/katex/katex@0.16.9.min.css">
     <link rel="stylesheet" id="hljsDark" href="/static/vendor/hljs/styles/github-dark@11.9.0.min.css">
     <link rel="stylesheet" id="hljsLight" href="/static/vendor/hljs/styles/github-light@11.9.0.min.css" disabled>
@@ -347,6 +347,9 @@
                 </div>
                 <div class="settings-hint" style="margin-top:-4px">越大请求数越少、下载越快，但单次请求的 CPU 开销线性增长：实测约 25~33ms CPU/MB，超过平台上限的响应会被静默截断。8~16 为推荐区间；调大后页面内下载若遇截断会自动折半重试并给出提示。</div>
                 <div class="settings-hint">设置对所有设备生效；各设备按自身类型自动取对应档位。<span id="setDeviceHint"></span></div>
+                <div class="settings-group">存储库（文件内容分库存储）</div>
+                <div id="storagePanel" class="storage-panel"><div class="storage-loading">加载中…</div></div>
+                <div class="settings-hint">元数据（目录结构、图床、分享）始终在主库；文件内容按「一个文件的全部字节落在同一个库」的规则分散存储。D1 免费版单库上限 500MB，账号最多 10 个库。</div>
                 <div id="setError" class="error-msg" style="display:none"></div>
             </div>
             <div style="padding:12px 20px 20px;text-align:right">
@@ -361,8 +364,9 @@
     <script src="/static/vendor/marked@15.0.12.min.js"></script>
     <script src="/static/vendor/purify@3.4.15.min.js"></script>
     <script src="/static/js/dialog.js"></script>
-    <script src="/static/js/api.js?v=20260915i"></script>
-    <script src="/static/js/settings.js?v=20260915i"></script>
+    <script src="/static/js/api.js?v=20260915k"></script>
+    <script src="/static/js/settings.js?v=20260915j"></script>
+    <script src="/static/js/storage.js?v=20260915k"></script>
     <script src="/static/js/player.js?v=20260913b"></script>
     <script src="/static/js/fileicons.js?v=b200724b"></script>
     <script src="/static/js/filemanager.js?v=20260915g"></script>

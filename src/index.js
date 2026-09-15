@@ -10,6 +10,8 @@ import * as ih from './imagehost.js';
 import * as share from './share.js';
 import * as dav from './webdav.js';
 import * as settings from './settings.js';
+import * as storageApi from './storage.js';
+import * as blobops from './blobops.js';
 
 export default {
   async fetch(request, env, ctx) {
@@ -28,14 +30,20 @@ export default {
   async scheduled(event, env, ctx) {
     const cutoff = Date.now() - 24 * 3600 * 1000;
     const stale = await env.DB.prepare(
-      'SELECT id FROM upload_sessions WHERE (updated_at > 0 AND updated_at < ?1) OR (updated_at = 0 AND created_at < ?1)',
+      'SELECT id, db_id FROM upload_sessions WHERE (updated_at > 0 AND updated_at < ?1) OR (updated_at = 0 AND created_at < ?1)',
     ).bind(cutoff).all();
     for (const row of stale.results || []) {
-      await env.DB.batch([
-        env.DB.prepare('DELETE FROM blobs WHERE key = ?1').bind('u:' + row.id),
-        env.DB.prepare('DELETE FROM upload_sessions WHERE id = ?1').bind(row.id),
-      ]);
+      // 暂存分片在会话钉住的库里, 会话行在主库 —— 分两处删
+      const vdb = storageApi.dbById(env, row.db_id || 1) || env.DB;
+      await vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind('u:' + row.id).run();
+      await env.DB.prepare('DELETE FROM upload_sessions WHERE id = ?1').bind(row.id).run();
     }
+    // 跨库改名/删除失败留下的待办: 重试到收敛 (孤儿字节与回滚失败的半改名都在这里消化)
+    const retry = await blobops.journalRetry(env.DB, env, 200);
+    if (retry.processed) console.log('blob_journal retry:', JSON.stringify(retry));
+    // 容量校准: 用 Cloudflare API 的真实 file_size 覆盖累加值 (未配置 CF_API_TOKEN 时自动跳过)
+    const cal = await storageApi.calibrate(env.DB, env);
+    if (!cal.ok) console.log('calibrate skipped:', cal.reason);
   },
 };
 
@@ -98,6 +106,14 @@ async function route(request, env, ctx) {
 
   // 应用参数设置保存 (读取在上面公开区)
   if (path === '/api/settings' && method === 'PUT') return settings.saveSettings(request, env, db);
+
+  // 存储分库管理 (库注册表 / 一键启用 / 注册新库 / 容量校准)
+  if (path === '/api/storage' && method === 'GET') return storageApi.listDbs(request, env, db);
+  if (path === '/api/storage/enable' && method === 'POST') return storageApi.enableNextDb(request, env, db);
+  if (path === '/api/storage/register' && method === 'POST') return storageApi.registerDb(request, env, db);
+  if (path === '/api/storage/calibrate' && method === 'POST') return storageApi.calibrateNow(request, env, db);
+  const stMod = path.match(/^\/api\/storage\/(\d+)$/);
+  if (stMod && method === 'PUT') return storageApi.updateDb(request, env, db, parseInt(stMod[1], 10));
 
   // 文件管理器
   if (path === '/api/files' && method === 'GET') return vfs.listFiles(request, env, db, url);

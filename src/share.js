@@ -165,6 +165,7 @@ export async function accessShare(req, env, db, id, url) {
     return serveFileContent(req, env, db, {
       key: 'f:' + target.path, size: target.size, mime: target.mime || mimeFromName(target.name),
       filename: target.name, inline: true, cacheTtl: 86400, cacheKeyPrefix: 'pub', nchunks: target.nchunks,
+      db_id: target.db_id || 1,
     });
   }
 
@@ -207,5 +208,6 @@ async function serveShareNode(req, env, db, node, inline) {
   return serveFileContent(req, env, db, {
     key: 'f:' + node.path, size: node.size, mime: node.mime || mimeFromName(node.name),
     filename: node.name, inline, cacheTtl: 300, cacheKeyPrefix: 'share', nchunks: node.nchunks,
+    db_id: node.db_id || 1,
   });
 }

@@ -48,6 +48,11 @@ const API = {
             const e = new Error((data && data.error) || `${method} ${url} 请求失败 (HTTP ${res.status})`);
             e.status = res.status;
             e.data = data;
+            // 存储容量不足 (分库): 交给统一告警按「名额池」做三态引导。
+            // 不吞异常 —— 调用方的 catch 照常收到, 这里只是多挂一个引导入口。
+            if (data && data.code === 'D1_CAPACITY' && window.StorageUI) {
+                try { StorageUI.handleError(e); } catch (err) { /* 告警失败不影响主流程 */ }
+            }
             throw e;
         }
         return data;
@@ -69,6 +74,13 @@ const API = {
     getSettings() { return this.json('GET', '/api/settings'); },
     saveSettings(settings) { return this.json('PUT', '/api/settings', settings); },
 
+    // Storage sharding (库注册表 / 一键扩容 / 注册新库 / 容量校准)
+    getStorage() { return this.json('GET', '/api/storage'); },
+    enableStorage() { return this.json('POST', '/api/storage/enable', {}); },
+    registerStorage(binding, databaseId) { return this.json('POST', '/api/storage/register', { binding, database_id: databaseId || '' }); },
+    calibrateStorage() { return this.json('POST', '/api/storage/calibrate', {}); },
+    updateStorage(id, patch) { return this.json('PUT', `/api/storage/${id}`, patch); },
+
     // Files
     listFiles(path = '') {
         return this.json('GET', `/api/files?path=${encodeURIComponent(path)}`);
@@ -77,7 +89,8 @@ const API = {
     // 单次 Range 窗口: 服务端按「参数设置 → 单次下载窗口」封顶, 这里取同一值切段
     _dlWindow() {
         try {
-            const v = window.AppSettings && AppSettings.downloadRange && AppSettings.downloadRange();
+            // 顶层 const 不进 window, 用 typeof 判断 (window.AppSettings 恒为 undefined)
+            const v = (typeof AppSettings !== 'undefined' && AppSettings.downloadRange) ? AppSettings.downloadRange() : null;
             if (Number.isFinite(v) && v >= 1048576) return v;
         } catch (e) { /* 未加载设置时用默认 */ }
         return 8 * 1024 * 1024;

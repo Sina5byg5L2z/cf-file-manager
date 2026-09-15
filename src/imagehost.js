@@ -11,7 +11,8 @@ import {
   json, jerr, sanitizeFilename, fileExt, mimeFromName,
   cacheGet, cachePut, cacheDel, randomId,
 } from './util.js';
-import { serveFileContent, writeBlob, invalidateIhCache, buildUploadResponse } from './vfs.js';
+import { serveFileContent, writeBlob, invalidateIhCache, invalidateIhList, buildUploadResponse } from './vfs.js';
+import { dbById, pickDb, capacityResponse, bumpUsage } from './storage.js';
 
 const ALLOWED = (mime) => mime.startsWith('image/') || mime.startsWith('video/') || mime.startsWith('audio/') || mime === 'application/pdf';
 
@@ -37,14 +38,20 @@ export async function upload(req, env, db) {
   const max = parseInt(env.MAX_UPLOAD_SIZE || '209715200', 10);
   if (data.length > max) return jerr(`文件超过最大上传限制 (${Math.floor(max / 1024 / 1024)}MB)`, 413);
 
-  const nchunks = await writeBlob(db, 'i:' + filename, data);
+  // 选库: 图床自持条目的字节同样落在 blobs 里, 一样受分库管辖
+  const picked = await pickDb(env, db, data.length);
+  if (!picked.ok) return capacityResponse(db, data.length, picked);
+  const vdb = picked.db;
+  const nchunks = await writeBlob(vdb, 'i:' + filename, data);
   const now = new Date().toISOString();
-  const res = await db.prepare('INSERT INTO image_host (filename, original_name, mime_type, size, upload_time) VALUES (?1,?2,?3,?4,?5)')
-    .bind(filename, origName, mime, data.length, now).run();
+  const res = await db.prepare('INSERT INTO image_host (filename, original_name, mime_type, size, upload_time, db_id) VALUES (?1,?2,?3,?4,?5,?6)')
+    .bind(filename, origName, mime, data.length, now, picked.row.id).run();
   if (res.error) {
-    await db.prepare('DELETE FROM blobs WHERE key = ?1').bind('i:' + filename).run();
+    await vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind('i:' + filename).run();
     return jerr(`数据库错误: ${res.error}`, 500);
   }
+  await bumpUsage(db, picked.row.id, data.length);
+  await invalidateIhList();   // 新条目要立即出现在列表里 (列表缓存 30s)
   return buildUploadResponse(req, filename, origName, mime);
 }
 
@@ -65,9 +72,13 @@ export async function uploadInit(req, env, db) {
   const now = Date.now();
   const fileSize = parseInt(body.file_size, 10) || 0;
   const chunkSize = parseInt(body.chunk_size, 10) || 0;
-  await db.prepare('INSERT INTO upload_sessions (id, kind, target, filename, total_chunks, mime, file_size, file_key, chunk_size, created_at, updated_at) VALUES (?1,\'image\',?2,?3,?4,?5,?6,\'\',?7,?8,?8)')
-    .bind(id, target, filename, total, mime, fileSize, chunkSize, now).run();
-  return json({ upload_id: id, total_chunks: total, resumed: false, received: [], hashes: [] });
+  // 与文件上传同样「钉库」: 暂存分片与最终键必须同库, 合并才不跨库 (I2)
+  const need = fileSize + 32 * (chunkSize || 1048576);
+  const picked = await pickDb(env, db, need);
+  if (!picked.ok) return capacityResponse(db, need, picked);
+  await db.prepare('INSERT INTO upload_sessions (id, kind, target, filename, total_chunks, mime, file_size, file_key, chunk_size, created_at, updated_at, db_id) VALUES (?1,\'image\',?2,?3,?4,?5,?6,\'\',?7,?8,?8,?9)')
+    .bind(id, target, filename, total, mime, fileSize, chunkSize, now, picked.row.id).run();
+  return json({ upload_id: id, total_chunks: total, resumed: false, received: [], hashes: [], db_id: picked.row.id });
 }
 
 // 分片上传 chunk/complete 与文件管理器共用同一实现 (vfs.js), 由路由按 kind 分发
@@ -93,8 +104,8 @@ export async function importFromFiles(req, env, db) {
   const filename = generateFilename(ext);
   try {
     await db.prepare(
-      'INSERT INTO image_host (filename, original_name, mime_type, size, upload_time, src_path) VALUES (?1,?2,?3,?4,?5,?6)',
-    ).bind(filename, node.name, mime, node.size, new Date().toISOString(), node.path).run();
+      'INSERT INTO image_host (filename, original_name, mime_type, size, upload_time, src_path, db_id) VALUES (?1,?2,?3,?4,?5,?6,?7)',
+    ).bind(filename, node.name, mime, node.size, new Date().toISOString(), node.path, node.db_id || 1).run();
   } catch (e) {
     const msg = String((e && e.message) || e);
     if (/Exceeded maximum DB size|7500/i.test(msg)) {
@@ -102,6 +113,7 @@ export async function importFromFiles(req, env, db) {
     }
     return jerr(`图床写入失败: ${msg}`, 500);
   }
+  await invalidateIhList();   // 新条目要立即出现在列表里 (列表缓存 30s)
   return buildUploadResponse(req, filename, node.name, mime);
 }
 
@@ -116,7 +128,7 @@ export async function serveImage(req, env, db, filename) {
   const hit = await cacheGet(ck);
   if (hit) meta = await hit.json();
   if (!meta) {
-    meta = await db.prepare('SELECT filename, mime_type, size, src_path FROM image_host WHERE filename = ?1').bind(filename).first();
+    meta = await db.prepare('SELECT filename, mime_type, size, src_path, db_id FROM image_host WHERE filename = ?1').bind(filename).first();
     if (meta) await cachePut(ck, json(meta), 300);
   }
   if (!meta) {
@@ -127,7 +139,8 @@ export async function serveImage(req, env, db, filename) {
   // 覆盖上传改了大小也不会读到过期元数据。缓存必须短 + 非 immutable:
   // 内容会随源文件变化, 无法承诺"同名同内容"。
   if (meta.src_path) {
-    const src = await db.prepare('SELECT size, mime, nchunks FROM fs_nodes WHERE path = ?1 AND is_dir = 0')
+    // 引用型: 字节归源文件所有 → 路由看源文件的 db_id
+    const src = await db.prepare('SELECT size, mime, nchunks, db_id FROM fs_nodes WHERE path = ?1 AND is_dir = 0')
       .bind(meta.src_path).first();
     if (!src) {
       // 正常路径下删除源文件已被拒绝, 这里只是兜底(如历史数据/直连 DB 改动)
@@ -135,7 +148,7 @@ export async function serveImage(req, env, db, filename) {
     }
     return serveFileContent(req, env, db, {
       key: 'f:' + meta.src_path, size: src.size, mime: src.mime || meta.mime_type,
-      filename, nchunks: src.nchunks,
+      filename, nchunks: src.nchunks, db_id: src.db_id || 1,
       inline: true, cacheTtl: 300, immutable: false, cacheKeyPrefix: 'pub',
     });
   }
@@ -143,6 +156,7 @@ export async function serveImage(req, env, db, filename) {
   return serveFileContent(req, env, db, {
     key: 'i:' + filename, size: meta.size, mime: meta.mime_type,
     filename, inline: true, cacheTtl: 31536000, immutable: true, cacheKeyPrefix: 'pub',
+    db_id: meta.db_id || 1,
   });
 }
 
@@ -163,7 +177,7 @@ export async function list(req, env, db, url) {
   const binds = search ? [`%${search.replace(/([%_\\])/g, '\\$1')}%`] : [];
   const totalRow = await db.prepare(`SELECT COUNT(*) AS c FROM image_host ${where}`).bind(...binds).first();
   const rows = await db.prepare(
-    `SELECT filename, original_name, mime_type, size, upload_time, src_path FROM image_host ${where} ORDER BY upload_time DESC LIMIT ?${search ? 2 : 1} OFFSET ?${search ? 3 : 2}`,
+    `SELECT filename, original_name, mime_type, size, upload_time, src_path, db_id FROM image_host ${where} ORDER BY upload_time DESC LIMIT ?${search ? 2 : 1} OFFSET ?${search ? 3 : 2}`,
   ).bind(...binds, pageSize, offset).all();
   const res = json({ items: rows.results || [], total: totalRow.c, page, page_size: pageSize });
   await cachePut(ck, res.clone(), 30);
@@ -177,15 +191,16 @@ export async function deleteImage(req, env, db, filename) {
   if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
     return jerr('无效文件名');
   }
-  const meta = await db.prepare('SELECT src_path, size FROM image_host WHERE filename = ?1').bind(filename).first();
+  const meta = await db.prepare('SELECT src_path, size, db_id FROM image_host WHERE filename = ?1').bind(filename).first();
   const refKey = meta && meta.src_path ? 'f:' + meta.src_path : 'i:' + filename;
 
-  const stmts = [];
+  // I5: 元数据先删 (此后直链即 404), 字节后删
+  await db.prepare('DELETE FROM image_host WHERE filename = ?1').bind(filename).run();
   if (!meta || !meta.src_path) {
-    stmts.push(db.prepare('DELETE FROM blobs WHERE key = ?1').bind('i:' + filename));
+    const vdb = dbById(env, (meta && meta.db_id) || 1) || db;
+    await vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind('i:' + filename).run();
+    if (meta) await bumpUsage(db, meta.db_id || 1, -(meta.size || 0));
   }
-  stmts.push(db.prepare('DELETE FROM image_host WHERE filename = ?1').bind(filename));
-  await db.batch(stmts);
 
   // 内容缓存键含 size; 有元数据时按实际 size 精确删除
   await invalidateIhCache(filename, meta ? [`F:pub:${refKey}:${meta.size}`] : []);

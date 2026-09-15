@@ -8,8 +8,10 @@ import { sanitizeRel, mimeFromName } from './util.js';
 import { getNode, serveFileContent, ensureDirs, moveNode, invalidateFileCache,
   ihRefs, ihRefsMessage, syncIhOnOverwrite } from './vfs.js';
 import { verifyCredentials } from './auth.js';
+import { dbById, pickDb, capacityResponse, bumpUsage } from './storage.js';
+import { collectFileRows, deleteBlobKeys, copyBlobKeys } from './blobops.js';
 
-const NODE_COLS = 'path, parent, name, is_dir, size, mime, created_at, modified_at, nchunks';
+const NODE_COLS = 'path, parent, name, is_dir, size, mime, created_at, modified_at, nchunks, db_id';
 
 function xmlEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -68,6 +70,7 @@ export async function webdavHandler(req, env, db, relPath) {
       return serveFileContent(req, env, db, {
         key: 'f:' + node.path, size: node.size, mime: node.mime || mimeFromName(node.name),
         filename: node.name, inline: true, cacheTtl: 60, cacheKeyPrefix: 'dav', nchunks: node.nchunks,
+        db_id: node.db_id || 1,
       });
     }
     case 'HEAD': {
@@ -80,8 +83,8 @@ export async function webdavHandler(req, env, db, relPath) {
         },
       });
     }
-    case 'PUT': return davPut(req, db, clean);
-    case 'DELETE': return davDelete(db, clean);
+    case 'PUT': return davPut(req, env, db, clean);
+    case 'DELETE': return davDelete(db, env, clean);
     case 'MKCOL': return davMkcol(db, clean);
     case 'MOVE': return davMoveCopy(req, env, db, clean, true);
     case 'COPY': return davMoveCopy(req, env, db, clean, false);
@@ -137,7 +140,7 @@ async function propfind(db, clean) {
   });
 }
 
-async function davPut(req, db, clean) {
+async function davPut(req, env, db, clean) {
   if (!clean) return new Response(null, { status: 400 });
   const sp = { path: clean };
   const i = clean.lastIndexOf('/');
@@ -148,10 +151,23 @@ async function davPut(req, db, clean) {
   // 自动补齐父目录 (与原版 create_dir_all 一致)
   await ensureDirs(db, parent);
 
+  // 选库: 覆盖写沿用原文件所在的库 (不产生跨库搬迁); 新文件按 Content-Length 预检。
+  // WebDAV 是流式请求, 长度未知时挑一个装得下的库, 真写满由 D1 的 7500 报错兜底。
+  const declared = parseInt(req.headers.get('Content-Length') || '0', 10) || 0;
+  let targetId = old && !old.is_dir ? (old.db_id || 1) : 0;
+  let vdb = targetId ? dbById(env, targetId) : null;
+  if (!vdb) {
+    const need = declared + 1024 * 1024;
+    const picked = await pickDb(env, db, need);
+    if (!picked.ok) return capacityResponse(db, need, picked);
+    targetId = picked.row.id;
+    vdb = picked.db;
+  }
+
   // 流式分片写入, 内存占用恒定
   const max = 200 * 1024 * 1024;
   const reader = req.body.getReader();
-  const stmts = [];
+  const blobStmts = [];   // 字节侧: 在目标库上执行
   let size = 0;
   let idx = 0;
   let buf = new Uint8Array(0);
@@ -164,27 +180,30 @@ async function davPut(req, db, clean) {
     merged.set(buf); merged.set(value, buf.length);
     buf = merged;
     while (buf.length >= 1024 * 1024) {
-      stmts.push(db.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) VALUES (?1,?2,?3)').bind('f:' + sp.path, idx++, buf.slice(0, 1024 * 1024)));
+      blobStmts.push(vdb.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) VALUES (?1,?2,?3)').bind('f:' + sp.path, idx++, buf.slice(0, 1024 * 1024)));
       buf = buf.slice(1024 * 1024);
     }
   }
   if (buf.length || idx === 0) {
-    stmts.push(db.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) VALUES (?1,?2,?3)').bind('f:' + sp.path, idx++, buf));
+    blobStmts.push(vdb.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) VALUES (?1,?2,?3)').bind('f:' + sp.path, idx++, buf));
   }
   const now = new Date().toISOString();
-  stmts.push(db.prepare('DELETE FROM blobs WHERE key = ?1 AND idx >= ?2').bind('f:' + sp.path, idx));
+  blobStmts.push(vdb.prepare('DELETE FROM blobs WHERE key = ?1 AND idx >= ?2').bind('f:' + sp.path, idx));
   // 覆盖写时内容已变, 旧缩略图作废
-  stmts.push(db.prepare('DELETE FROM blobs WHERE key = ?1').bind('t:' + sp.path));
-  stmts.push(db.prepare('INSERT OR REPLACE INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7)')
-    .bind(clean, parent, name, size, mimeFromName(name), now, idx));
-  await db.batch(stmts);
+  blobStmts.push(vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind('t:' + sp.path));
+  // 字节先落 (单库 batch 原子)
+  await vdb.batch(blobStmts);
+  // 元数据后写 (I5): 此刻字节已经就位, 才让文件对用户可见
+  await db.prepare('INSERT OR REPLACE INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7,?8)')
+    .bind(clean, parent, name, size, mimeFromName(name), now, idx, targetId).run();
+  await bumpUsage(db, targetId, size - (old && !old.is_dir ? old.size : 0));
   if (old && !old.is_dir) await invalidateFileCache(clean, old.size);
   // 被图床引用的源文件被覆盖: 直链内容跟随变化
   if (old && !old.is_dir) await syncIhOnOverwrite(db, clean, size, old.size);
   return new Response(null, { status: 201 });
 }
 
-async function davDelete(db, clean) {
+async function davDelete(db, env, clean) {
   if (!clean) return new Response(null, { status: 403 });
   const node = await getNode(db, clean);
   if (!node) return new Response(null, { status: 404 });
@@ -196,11 +215,18 @@ async function davDelete(db, clean) {
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     });
   }
-  await db.batch([
-    db.prepare('DELETE FROM blobs WHERE key IN (SELECT \'f:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(clean),
-    db.prepare('DELETE FROM blobs WHERE key IN (SELECT \'t:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(clean),
-    db.prepare('DELETE FROM fs_nodes WHERE path = ?1 OR path LIKE ?1 || \'/%\'').bind(clean),
-  ]);
+  // I5: 元数据先删 (此后用户不可见), 再按归属库删字节; 失败只留孤儿, 由 journal 重试收敛
+  const files = await collectFileRows(db, clean);
+  await db.prepare('DELETE FROM fs_nodes WHERE path = ?1 OR path LIKE ?1 || \'/%\'').bind(clean).run();
+  if (files.length) {
+    await deleteBlobKeys(db, env, files);
+    const per = new Map();
+    for (const f of files) {
+      const id = f.db_id || 1;
+      per.set(id, (per.get(id) || 0) + (f.size || 0));
+    }
+    for (const [id, delta] of per) await bumpUsage(db, id, -delta);
+  }
   if (!node.is_dir) await invalidateFileCache(clean, node.size);
   return new Response(null, { status: 200 });
 }
@@ -231,33 +257,31 @@ async function davMoveCopy(req, env, db, srcClean, isMove) {
   await ensureDirs(db, destParent);
 
   if (isMove) {
-    const r = await moveNode(db, srcClean, destParent, destName);
+    const r = await moveNode(db, env, srcClean, destParent, destName);
     if (r.error) return new Response(null, { status: 400 });
   } else {
-    // COPY: 元数据 + blob 各一条 SELECT..INSERT
+    // COPY: 字节留在源文件各自的库 (同库 INSERT..SELECT, 字节不过 Worker 内存), 元数据最后写 (I5)
     const now = new Date().toISOString();
     if (src.is_dir) {
       const sub = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE path = ?1 OR path LIKE ?1 || '/%'`).bind(srcClean).all();
       const off = srcClean.length;
       const stmts = [];
+      const pairs = [];
       for (const r of sub.results || []) {
         const np = dest + r.path.slice(off);
         const npParent = r.path === srcClean ? destParent : dest + r.parent.slice(off);
         const nName = r.path === srcClean ? destName : r.name;
-        stmts.push(db.prepare('INSERT INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)')
-          .bind(np, npParent, nName, r.is_dir, r.size, r.mime, r.created_at, now, r.nchunks));
-        if (!r.is_dir) {
-          stmts.push(db.prepare('INSERT INTO blobs (key, idx, data) SELECT ?, idx, data FROM blobs WHERE key = ?').bind('f:' + np, 'f:' + r.path));
-          stmts.push(db.prepare('INSERT INTO blobs (key, idx, data) SELECT ?, idx, data FROM blobs WHERE key = ?').bind('t:' + np, 't:' + r.path));
-        }
+        stmts.push(db.prepare('INSERT INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)')
+          .bind(np, npParent, nName, r.is_dir, r.size, r.mime, r.created_at, now, r.nchunks, r.db_id || 1));
+        if (!r.is_dir) pairs.push({ src: r.path, dst: np, db_id: r.db_id || 1 });
       }
+      if (pairs.length) await copyBlobKeys(db, env, pairs);
       await db.batch(stmts);
     } else {
+      await copyBlobKeys(db, env, [{ src: srcClean, dst: dest, db_id: src.db_id || 1 }]);
       await db.batch([
-        db.prepare('INSERT INTO blobs (key, idx, data) SELECT ?2, idx, data FROM blobs WHERE key = ?1').bind('f:' + srcClean, 'f:' + dest),
-        db.prepare('INSERT INTO blobs (key, idx, data) SELECT ?2, idx, data FROM blobs WHERE key = ?1').bind('t:' + srcClean, 't:' + dest),
-        db.prepare('INSERT INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7)')
-          .bind(dest, destParent, destName, src.size, src.mime, now, src.nchunks),
+        db.prepare('INSERT INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7,?8)')
+          .bind(dest, destParent, destName, src.size, src.mime, now, src.nchunks, src.db_id || 1),
       ]);
     }
   }

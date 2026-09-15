@@ -15,6 +15,8 @@ import {
 } from './util.js';
 import { validateToken } from './auth.js';
 import { rangeMaxOf } from './settings.js';
+import { dbById, dbOfNode, pickDb, capacityResponse, bumpUsage } from './storage.js';
+import { collectFileRows, deleteBlobKeys, rewriteBlobKeys, copyBlobKeys } from './blobops.js';
 
 // 整文件(无 Range)单次流式响应的安全上限: 超过它平台会在 CPU 上限处静默截断
 // (实测掐断点约 2.0s CPU ≈ 60~90MiB), 取 32MiB (~1.0s CPU) 留一倍余量;
@@ -22,7 +24,7 @@ import { rangeMaxOf } from './settings.js';
 const FULL_STREAM_MAX = 32 * 1024 * 1024;
 
 // ---------------- 元数据访问 ----------------
-const NODE_COLS = 'path, parent, name, is_dir, size, mime, created_at, modified_at, nchunks';
+const NODE_COLS = 'path, parent, name, is_dir, size, mime, created_at, modified_at, nchunks, db_id';
 
 export async function getNode(db, path) {
   const clean = sanitizeRel(path);
@@ -91,6 +93,8 @@ export async function rekeyIhRefs(db, fromPath, toPath) {
   ).bind(from, to, off).run();
   // 缓存里存着旧的 src_path 与旧的内容键
   await Promise.all(refs.map((r) => invalidateIhCache(r.filename)));
+  // 图床列表 (IL:) 缓存里的 src_path 也过期了
+  await invalidateIhList();
 }
 
 // 源文件被覆盖写: 直链内容跟随变化 → 同步 size 并失效图床缓存
@@ -161,16 +165,23 @@ export async function mkdir(req, env, db, url) {
   return json({ created: body.name });
 }
 
-// 递归收集子树所有 blob key 并删除 (单条子查询完成, 避免逐行)
-// t: 前缀是前端生成的缩略图 blob, 必须在 fs_nodes 删除前一并清理
-async function deleteSubtree(db, path) {
+// 递归删除子树。分库后不能用「一条子查询搞定」的写法: 字节可能分散在多个库,
+// 而 fs_nodes 只在主库。按 I5「元数据先删、字节后删」执行 ——
+// 先取回子树全部文件行(含归属库), 再删元数据, 最后按库删字节。
+// 中途失败只留下孤儿字节(用户不可见), blob_journal + cron 会重试收敛。
+async function deleteSubtree(db, env, path) {
   const clean = sanitizeRel(path);
-  const stmts = [
-    db.prepare('DELETE FROM blobs WHERE key IN (SELECT \'f:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(clean),
-    db.prepare('DELETE FROM blobs WHERE key IN (SELECT \'t:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(clean),
-    db.prepare('DELETE FROM fs_nodes WHERE path = ?1 OR path LIKE ?1 || \'/%\'').bind(clean),
-  ];
-  await db.batch(stmts);
+  const files = await collectFileRows(db, clean);
+  await db.prepare('DELETE FROM fs_nodes WHERE path = ?1 OR path LIKE ?1 || \'/%\'').bind(clean).run();
+  if (!files.length) return;
+  await deleteBlobKeys(db, env, files);
+  // 用量记帐: 按归属库分别扣减
+  const per = new Map();
+  for (const f of files) {
+    const id = f.db_id || 1;
+    per.set(id, (per.get(id) || 0) + (f.size || 0));
+  }
+  for (const [id, delta] of per) await bumpUsage(db, id, -delta);
 }
 
 export async function deleteFile(req, env, db, url) {
@@ -181,7 +192,7 @@ export async function deleteFile(req, env, db, url) {
   // 图床零拷贝引用: 字节只有这一份, 删了直链就没了 → 先要求解除引用
   const refs = await ihRefs(db, path);
   if (refs.length) return jerr(ihRefsMessage(refs, node.is_dir), 409);
-  await deleteSubtree(db, path);
+  await deleteSubtree(db, env, path);
   await invalidateFileCache(path, node.size);
   await invalidateDir(db, node.parent);
   return json({ deleted: path });
@@ -202,7 +213,7 @@ export async function batchDelete(req, env, db) {
     // 被图床引用的路径跳过 (不阻断其余项), 逐条把原因回传前端
     const refs = await ihRefs(db, path);
     if (refs.length) { errors.push(`${path}: ${ihRefsMessage(refs, node.is_dir)}`); continue; }
-    await deleteSubtree(db, path);
+    await deleteSubtree(db, env, path);
     await invalidateFileCache(path, node.size);
     parents.add(node.parent);
     deleted.push(path);
@@ -212,7 +223,7 @@ export async function batchDelete(req, env, db) {
 }
 
 // 移动/重命名共用: 重写子树 path/parent 与对应 blob key
-export async function moveNode(db, fromPath, toDir, newName) {
+export async function moveNode(db, env, fromPath, toDir, newName) {
   const from = sanitizeRel(fromPath);
   const node = await getNode(db, from);
   if (!node) return { error: '源不存在', status: 404 };
@@ -227,18 +238,39 @@ export async function moveNode(db, fromPath, toDir, newName) {
   const offN = from.length + 1; // fs_nodes: 剥离 'from' 前缀
   const offB = from.length + 3; // blobs: 剥离 'f:' + 'from' 前缀
   const now = new Date().toISOString();
-  if (node.is_dir) {
-    await db.batch([
-      db.prepare('UPDATE blobs SET key = \'f:\' || ?2 || substr(key, ?3) WHERE key IN (SELECT \'f:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(from, sp.path, offB),
-      db.prepare('UPDATE blobs SET key = \'t:\' || ?2 || substr(key, ?3) WHERE key IN (SELECT \'t:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(from, sp.path, offB),
-      db.prepare('UPDATE fs_nodes SET path = ?2 || substr(path, ?3), parent = CASE WHEN path = ?1 THEN ?4 ELSE ?2 || substr(parent, ?3) END, modified_at = ?5 WHERE path = ?1 OR path LIKE ?1 || \'/%\'').bind(from, sp.path, offN, sp.parent, now),
-    ]);
+  const fsStmt = node.is_dir
+    ? db.prepare('UPDATE fs_nodes SET path = ?2 || substr(path, ?3), parent = CASE WHEN path = ?1 THEN ?4 ELSE ?2 || substr(parent, ?3) END, modified_at = ?5 WHERE path = ?1 OR path LIKE ?1 || \'/%\'').bind(from, sp.path, offN, sp.parent, now)
+    : db.prepare('UPDATE fs_nodes SET path = ?2, parent = ?3, name = ?4, modified_at = ?5 WHERE path = ?1').bind(from, sp.path, sp.parent, name, now);
+
+  // 受影响的文件行与其归属库 (分库后字节可能不在主库)
+  const fr = await db.prepare("SELECT path, db_id FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || '/%') AND is_dir = 0").bind(from).all();
+  const files = fr.results || [];
+  const dbIds = new Set(files.map((r) => r.db_id || 1));
+
+  if (dbIds.size === 0 || (dbIds.size === 1 && dbIds.has(1))) {
+    // 快路径 (上线初期的常态: 字节都在主库): 与原实现完全一致 ——
+    // blobs 与元数据放进同一个 batch, 单库事务, 要么全成要么全败
+    const bStmts = node.is_dir
+      ? [
+          db.prepare('UPDATE blobs SET key = \'f:\' || ?2 || substr(key, ?3) WHERE key IN (SELECT \'f:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(from, sp.path, offB),
+          db.prepare('UPDATE blobs SET key = \'t:\' || ?2 || substr(key, ?3) WHERE key IN (SELECT \'t:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(from, sp.path, offB),
+        ]
+      : [
+          db.prepare('UPDATE blobs SET key = ?2 WHERE key = ?1').bind('f:' + from, 'f:' + sp.path),
+          db.prepare('UPDATE blobs SET key = ?2 WHERE key = ?1').bind('t:' + from, 't:' + sp.path),
+        ];
+    await db.batch([...bStmts, fsStmt]);
   } else {
-    await db.batch([
-      db.prepare('UPDATE blobs SET key = ?2 WHERE key = ?1').bind('f:' + from, 'f:' + sp.path),
-      db.prepare('UPDATE blobs SET key = ?2 WHERE key = ?1').bind('t:' + from, 't:' + sp.path),
-      db.prepare('UPDATE fs_nodes SET path = ?2, parent = ?3, name = ?4, modified_at = ?5 WHERE path = ?1').bind(from, sp.path, sp.parent, name, now),
-    ]);
+    // 跨库: 没有跨库事务。先改字节(失败会自动回滚), 成功后再改元数据;
+    // 元数据失败则把字节改回去 —— 保证最终与 fs_nodes 保持一致, 不留坏引用。
+    const r = await rewriteBlobKeys(db, env, files, from, sp.path);
+    if (!r.ok) return { error: r.error, status: 500 };
+    try {
+      await fsStmt.run();
+    } catch (e) {
+      await rewriteBlobKeys(db, env, files, sp.path, from);
+      return { error: '改名失败（已回滚）', status: 500 };
+    }
   }
   // 图床零拷贝引用: 源文件/目录换了路径, 必须同步改写 src_path, 否则直链 404
   await rekeyIhRefs(db, from, sp.path);
@@ -252,7 +284,7 @@ export async function rename(req, env, db) {
   try { body = await req.json(); } catch { return jerr('请求格式错误'); }
   const node = await getNode(db, body.path || '');
   if (!node) return jerr('文件不存在', 404);
-  const r = await moveNode(db, body.path, node.parent, body.new_name);
+  const r = await moveNode(db, env, body.path, node.parent, body.new_name);
   if (r.error) return jerr(r.error, r.status);
   return json({ renamed: body.new_name });
 }
@@ -260,7 +292,7 @@ export async function rename(req, env, db) {
 export async function moveFile(req, env, db) {
   let body;
   try { body = await req.json(); } catch { return jerr('请求格式错误'); }
-  const r = await moveNode(db, body.from, body.to, null);
+  const r = await moveNode(db, env, body.from, body.to, null);
   if (r.error) return jerr(r.error, r.status);
   return json({ moved: body.from, to: body.to });
 }
@@ -278,30 +310,30 @@ export async function copyFile(req, env, db) {
   if (node.is_dir && sp.path.startsWith(from + '/')) return jerr('不能复制到自身内部');
   if (await getNode(db, sp.path)) return jerr('目标已存在', 409);
 
+  const nowIso = new Date().toISOString();
   if (node.is_dir) {
-    // 复制整棵子树: 元数据行 + 每个文件的 blob 拷贝语句
+    // 复制整棵子树: 先搬字节(留在源文件各自的库, 同库 INSERT..SELECT 零成本), 再写元数据行。
+    // 顺序遵循 I5 (字节先落、元数据后写): 中途失败只会留下孤儿字节, 不会出现"有记录没数据"。
     const sub = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE path = ?1 OR path LIKE ?1 || '/%'`).bind(from).all();
     const rows = sub.results || [];
     const off = from.length;
     const stmts = [];
+    const pairs = [];
     for (const r of rows) {
       const np = sp.path + r.path.slice(off);
       const npParent = r.path === from ? sp.parent : sp.path + r.parent.slice(off);
       const nName = r.path === from ? sp.name : r.name;
-      stmts.push(db.prepare('INSERT INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)')
-        .bind(np, npParent, nName, r.is_dir, r.size, r.mime, r.created_at, new Date().toISOString(), r.nchunks));
-      if (!r.is_dir) {
-        stmts.push(db.prepare('INSERT INTO blobs (key, idx, data) SELECT ?, idx, data FROM blobs WHERE key = ?').bind('f:' + np, 'f:' + r.path));
-        stmts.push(db.prepare('INSERT INTO blobs (key, idx, data) SELECT ?, idx, data FROM blobs WHERE key = ?').bind('t:' + np, 't:' + r.path));
-      }
+      stmts.push(db.prepare('INSERT INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)')
+        .bind(np, npParent, nName, r.is_dir, r.size, r.mime, r.created_at, nowIso, r.nchunks, r.db_id || 1));
+      if (!r.is_dir) pairs.push({ src: r.path, dst: np, db_id: r.db_id || 1 });
     }
+    if (pairs.length) await copyBlobKeys(db, env, pairs);
     await db.batch(stmts);
   } else {
+    await copyBlobKeys(db, env, [{ src: from, dst: sp.path, db_id: node.db_id || 1 }]);
     await db.batch([
-      db.prepare('INSERT INTO blobs (key, idx, data) SELECT ?2, idx, data FROM blobs WHERE key = ?1').bind('f:' + from, 'f:' + sp.path),
-      db.prepare('INSERT INTO blobs (key, idx, data) SELECT ?2, idx, data FROM blobs WHERE key = ?1').bind('t:' + from, 't:' + sp.path),
-      db.prepare('INSERT INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7)')
-        .bind(sp.path, sp.parent, sp.name, node.size, node.mime, new Date().toISOString(), node.nchunks),
+      db.prepare('INSERT INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7,?8)')
+        .bind(sp.path, sp.parent, sp.name, node.size, node.mime, nowIso, node.nchunks, node.db_id || 1),
     ]);
   }
   await invalidateDir(db, sp.parent);
@@ -321,11 +353,11 @@ export async function writeBlob(db, key, data) {
   return Math.ceil(data.length / CHUNK_SIZE) || 1;
 }
 
-async function upsertFileNode(db, path, size, mime, nchunks) {
+async function upsertFileNode(db, path, size, mime, nchunks, dbId = 1) {
   const sp = splitPath(path);
   const now = new Date().toISOString();
-  await db.prepare('INSERT OR REPLACE INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7)')
-    .bind(sp.path, sp.parent, sp.name, size, mime, now, nchunks).run();
+  await db.prepare('INSERT OR REPLACE INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7,?8)')
+    .bind(sp.path, sp.parent, sp.name, size, mime, now, nchunks, dbId).run();
 }
 
 // 逐级补齐缺失的祖先目录 (WebDAV MKCOL/PUT 需要自动建目录)
@@ -363,10 +395,21 @@ export async function uploadFile(req, env, db, url) {
     const sp = splitPath(`${dir}/${name}`);
     const old = await getNode(db, sp.path);
     const data = new Uint8Array(await value.arrayBuffer());
+    // 选库: 覆盖写沿用原文件所在的库 (不产生跨库搬迁); 新文件按容量挑一个装得下的
+    let targetId = old && !old.is_dir ? (old.db_id || 1) : 0;
+    let vdb = targetId ? dbById(env, targetId) : null;
+    if (!vdb) {
+      const need = data.length + CHUNK_SIZE;
+      const picked = await pickDb(env, db, need);
+      if (!picked.ok) return capacityResponse(db, need, picked);
+      targetId = picked.row.id;
+      vdb = picked.db;
+    }
     // 覆盖写时内容已变, 旧缩略图作废
-    await db.prepare('DELETE FROM blobs WHERE key = ?1').bind('t:' + sp.path).run();
-    const n = await writeBlob(db, 'f:' + sp.path, data);
-    await upsertFileNode(db, sp.path, data.length, mimeFromName(name), n);
+    await vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind('t:' + sp.path).run();
+    const n = await writeBlob(vdb, 'f:' + sp.path, data);
+    await upsertFileNode(db, sp.path, data.length, mimeFromName(name), n, targetId);
+    await bumpUsage(db, targetId, data.length - (old && !old.is_dir ? old.size : 0));
     if (old && !old.is_dir) await invalidateFileCache(sp.path, old.size);
     // 被图床引用的源文件被覆盖: 直链内容跟随变化 (同步 size + 失效图床缓存)
     if (old && !old.is_dir) await syncIhOnOverwrite(db, sp.path, data.length, old.size);
@@ -401,10 +444,13 @@ export async function uploadInit(req, env, db) {
   // 命中未完成的同源会话 → 复用 (要求目标路径/文件名/分片数/分片大小一致)
   if (fileKey) {
     const exist = await db.prepare(
-      'SELECT id, target, kind, total_chunks, chunk_size, merged_upto FROM upload_sessions WHERE kind = \'file\' AND file_key = ?1 AND target = ?2 AND total_chunks = ?3 AND (chunk_size = ?4 OR chunk_size = 0) ORDER BY updated_at DESC LIMIT 1',
+      'SELECT id, target, kind, total_chunks, chunk_size, merged_upto, db_id FROM upload_sessions WHERE kind = \'file\' AND file_key = ?1 AND target = ?2 AND total_chunks = ?3 AND (chunk_size = ?4 OR chunk_size = 0) ORDER BY updated_at DESC LIMIT 1',
     ).bind(fileKey, target, total, chunkSize).first();
     if (exist) {
-      const received = await db.prepare('SELECT idx, hash FROM blobs WHERE key = ?1 ORDER BY idx').bind('u:' + exist.id).all();
+      // 暂存分片在会话「钉住」的那个库里。必须先按主库里的 db_id 去对应库查,
+      // 否则会查错库、误判「分片全丢」, 让用户把已经传完的几个 G 重传一遍。
+      const vdb = dbById(env, exist.db_id || 1) || db;
+      const received = await vdb.prepare('SELECT idx, hash FROM blobs WHERE key = ?1 ORDER BY idx').bind('u:' + exist.id).all();
       const rows = received.results || [];
       // 已传分片 = 暂存键上的 + 已合并进最终键的 (complete 分批中断后的续传场景)
       const got = new Set(rows.map((r) => r.idx));
@@ -416,17 +462,25 @@ export async function uploadInit(req, env, db) {
         upload_id: exist.id,
         total_chunks: exist.total_chunks,
         resumed: true,
+        db_id: exist.db_id || 1,
         received: [...got].sort((a, b) => a - b),
         hashes: rows.filter((r) => r.hash).map((r) => ({ idx: r.idx, hash: r.hash })),
       });
     }
   }
 
+  // 新会话: 在这里「钉库」。needBytes 必须包含合并峰值 ——
+  // mergeStagingBatch 是 INSERT..SELECT + DELETE, 同一事务内新旧 key 短暂并存,
+  // 峰值空间不足会在合并中途撞 7500 (此时文件已经传完, 用户感受最差)。
+  const need = fileSize + MERGE_BATCH * (chunkSize || CHUNK_SIZE);
+  const picked = await pickDb(env, db, need);
+  if (!picked.ok) return capacityResponse(db, need, picked);
+
   const id = randomId(12);
   await db.prepare(
-    'INSERT INTO upload_sessions (id, kind, target, filename, total_chunks, mime, file_size, file_key, chunk_size, created_at, updated_at) VALUES (?1,\'file\',?2,?3,?4,\'\',?5,?6,?7,?8,?8)',
-  ).bind(id, target, filename, total, fileSize, fileKey, chunkSize, now).run();
-  return json({ upload_id: id, total_chunks: total, resumed: false, received: [], hashes: [] });
+    'INSERT INTO upload_sessions (id, kind, target, filename, total_chunks, mime, file_size, file_key, chunk_size, created_at, updated_at, db_id) VALUES (?1,\'file\',?2,?3,?4,\'\',?5,?6,?7,?8,?8,?9)',
+  ).bind(id, target, filename, total, fileSize, fileKey, chunkSize, now, picked.row.id).run();
+  return json({ upload_id: id, total_chunks: total, resumed: false, received: [], hashes: [], db_id: picked.row.id });
 }
 
 export async function uploadChunk(req, env, db) {
@@ -437,18 +491,18 @@ export async function uploadChunk(req, env, db) {
   const dataField = [...form.values()].find((v) => typeof v !== 'string');
   if (!uploadId || !Number.isFinite(idx) || !dataField) return jerr('缺少 upload_id 或数据');
 
-  const session = await db.prepare('SELECT total_chunks FROM upload_sessions WHERE id = ?1').bind(uploadId).first();
+  const session = await db.prepare('SELECT total_chunks, db_id FROM upload_sessions WHERE id = ?1').bind(uploadId).first();
   if (!session) return jerr('上传会话不存在', 404);
   if (idx < 0 || idx >= session.total_chunks) return jerr('分片索引超出范围');
   const data = new Uint8Array(await dataField.arrayBuffer());
   if (data.length > 2 * 1024 * 1024) return jerr('分片过大');
 
+  // 暂存分片必须落进会话钉住的那个库 (I2: 与最终键同库, 合并才不跨库)
+  const vdb = dbById(env, session.db_id || 1) || db;
   const hash = String(form.get('chunk_hash') || '').slice(0, 64);
-  await db.batch([
-    db.prepare('INSERT OR REPLACE INTO blobs (key, idx, data, hash) VALUES (?1, ?2, ?3, ?4)').bind('u:' + uploadId, idx, data, hash || null),
-    // 刷新活跃时间: 续传中的会话不会被定时清理误删
-    db.prepare('UPDATE upload_sessions SET updated_at = ?2 WHERE id = ?1').bind(uploadId, Date.now()),
-  ]);
+  await vdb.prepare('INSERT OR REPLACE INTO blobs (key, idx, data, hash) VALUES (?1, ?2, ?3, ?4)').bind('u:' + uploadId, idx, data, hash || null).run();
+  // 刷新活跃时间: 续传中的会话不会被定时清理误删 (会话行在主库)
+  await db.prepare('UPDATE upload_sessions SET updated_at = ?2 WHERE id = ?1').bind(uploadId, Date.now()).run();
   // 不再每片做一次 COUNT(*) 全表统计 (片数多时是线性开销); 前端自己维护 sentChunks
   return json({ chunk_index: idx, total: session.total_chunks });
 }
@@ -457,9 +511,11 @@ export async function uploadChunk(req, env, db) {
 export async function uploadStatus(req, env, db, url) {
   const uploadId = url.searchParams.get('upload_id');
   if (!uploadId) return jerr('缺少 upload_id');
-  const session = await db.prepare('SELECT id, total_chunks, filename, target, file_size, chunk_size, updated_at, merged_upto FROM upload_sessions WHERE id = ?1').bind(uploadId).first();
+  const session = await db.prepare('SELECT id, total_chunks, filename, target, file_size, chunk_size, updated_at, merged_upto, db_id FROM upload_sessions WHERE id = ?1').bind(uploadId).first();
   if (!session) return json({ exists: false, received: [] });
-  const rows = await db.prepare('SELECT idx, hash FROM blobs WHERE key = ?1 ORDER BY idx').bind('u:' + uploadId).all();
+  // 同 uploadInit: 先按会话的 db_id 定位库, 再查暂存分片
+  const vdb = dbById(env, session.db_id || 1) || db;
+  const rows = await vdb.prepare('SELECT idx, hash FROM blobs WHERE key = ?1 ORDER BY idx').bind('u:' + uploadId).all();
   const list = rows.results || [];
   // 已合并进最终键的分片也算已传 (complete 分批中断后的续传场景)
   const got = new Set(list.map((r) => r.idx));
@@ -475,6 +531,7 @@ export async function uploadStatus(req, env, db, url) {
     chunk_size: session.chunk_size,
     updated_at: session.updated_at,
     merged_upto: merged,
+    db_id: session.db_id || 1,
     received: [...got].sort((a, b) => a - b),
     hashes: list.filter((r) => r.hash).map((r) => ({ idx: r.idx, hash: r.hash })),
   });
@@ -489,19 +546,20 @@ export async function uploadAbort(req, env, db) {
   const uploadId = body.upload_id;
   if (!uploadId) return jerr('缺少 upload_id');
 
-  const session = await db.prepare('SELECT id, kind, target, merged_upto FROM upload_sessions WHERE id = ?1').bind(uploadId).first();
+  const session = await db.prepare('SELECT id, kind, target, merged_upto, db_id FROM upload_sessions WHERE id = ?1').bind(uploadId).first();
   if (!session) return json({ ok: true, deleted: 0 }); // 已不存在 → 视为成功 (幂等)
 
+  const vdb = dbById(env, session.db_id || 1) || db;
   const stmts = [
-    db.prepare('DELETE FROM blobs WHERE key = ?1').bind('u:' + uploadId),
+    vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind('u:' + uploadId),
   ];
   // 合并过半的最终键数据也是本次上传的产物 (未写入 fs_nodes, 对用户不可见) → 清掉
   if ((session.merged_upto || 0) > 0) {
     const finalKey = session.kind === 'image' ? 'i:' + session.target : 'f:' + session.target;
-    stmts.push(db.prepare('DELETE FROM blobs WHERE key = ?1').bind(finalKey));
+    stmts.push(vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind(finalKey));
   }
-  stmts.push(db.prepare('DELETE FROM upload_sessions WHERE id = ?1').bind(uploadId));
-  await db.batch(stmts);
+  await vdb.batch(stmts);
+  await db.prepare('DELETE FROM upload_sessions WHERE id = ?1').bind(uploadId).run();
   return json({ ok: true, deleted: 1 });
 }
 
@@ -533,6 +591,8 @@ export async function uploadComplete(req, env, db) {
   const total = session.total_chunks;
   const stageKey = 'u:' + uploadId;
   const finalKey = session.kind === 'image' ? 'i:' + session.target : 'f:' + session.target;
+  // 会话钉住的库: 暂存分片、最终键、缩略图都在这里; 元数据仍在主库 (I2 / I3)
+  const vdb = dbById(env, session.db_id || 1) || db;
 
   // 批次区间: 首次从 0 开始, 后续由前端回传上一次的 next
   let start = 0;
@@ -542,7 +602,7 @@ export async function uploadComplete(req, env, db) {
 
   // 只有首次请求做一次全量缺失校验 (后续批次暂存行已被搬走, 扫不出完整信息)
   if (start === 0) {
-    const present = await db.prepare('SELECT idx FROM blobs WHERE key = ?1').bind(stageKey).all();
+    const present = await vdb.prepare('SELECT idx FROM blobs WHERE key = ?1').bind(stageKey).all();
     const idxs = new Set((present.results || []).map((r) => r.idx));
     const merged = session.merged_upto || 0;
     for (let i = 0; i < merged; i++) idxs.add(i); // 之前批次已合并的
@@ -554,7 +614,7 @@ export async function uploadComplete(req, env, db) {
   }
 
   const end = Math.min(start + MERGE_BATCH, total);
-  await mergeStagingBatch(db, stageKey, finalKey, start, end);
+  await mergeStagingBatch(vdb, stageKey, finalKey, start, end);
   // 刷新活跃时间: 分批合并可能跨分钟, 防止定时任务把进行中的会话回收
   await db.prepare('UPDATE upload_sessions SET merged_upto = ?2, updated_at = ?3 WHERE id = ?1')
     .bind(uploadId, end, Date.now()).run();
@@ -565,39 +625,48 @@ export async function uploadComplete(req, env, db) {
   }
 
   // 全部合并完成: 按最终键统计真实字节数 (暂存键此刻已空)
-  const sizeRow = await db.prepare('SELECT COALESCE(SUM(LENGTH(data)),0) AS s FROM blobs WHERE key = ?1').bind(finalKey).first();
+  const sizeRow = await vdb.prepare('SELECT COALESCE(SUM(LENGTH(data)),0) AS s FROM blobs WHERE key = ?1').bind(finalKey).first();
   const size = sizeRow.s;
   const max = parseInt(env.MAX_UPLOAD_SIZE || '209715200', 10);
   if (size > max) {
-    await db.batch([
-      db.prepare('DELETE FROM blobs WHERE key = ?1').bind(finalKey),
-      db.prepare('DELETE FROM blobs WHERE key = ?1').bind(stageKey),
-      db.prepare('DELETE FROM upload_sessions WHERE id = ?1').bind(uploadId),
+    await vdb.batch([
+      vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind(finalKey),
+      vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind(stageKey),
     ]);
+    await db.prepare('DELETE FROM upload_sessions WHERE id = ?1').bind(uploadId).run();
     return jerr(`文件超过最大上传限制 (${Math.floor(max / 1024 / 1024)}MB)`, 413);
   }
 
   const old = session.kind === 'file' ? await getNode(db, session.target) : null;
   const now = new Date().toISOString();
-  const stmts = [
+
+  // ① 字节侧收尾 (在会话的库里, 单库 batch 原子): 清尾部残留 + 旧缩略图
+  await vdb.batch([
     // 本次分片数少于同名旧文件时, 最终键尾部会残留多余分片
-    db.prepare('DELETE FROM blobs WHERE key = ?1 AND idx >= ?2').bind(finalKey, total),
+    vdb.prepare('DELETE FROM blobs WHERE key = ?1 AND idx >= ?2').bind(finalKey, total),
     // 覆盖上传时内容已变, 旧缩略图作废 (新缩略图由前端生成后回写)
-    db.prepare('DELETE FROM blobs WHERE key = ?1').bind('t:' + session.target),
-  ];
+    vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind('t:' + session.target),
+  ]);
+
+  // ② 元数据侧 (主库)。字节此刻已经就位, 这里才让文件对用户可见 —— I5 字节先落、元数据后写
+  const stmts = [];
   if (session.kind === 'image') {
-    stmts.push(db.prepare('INSERT OR REPLACE INTO image_host (filename, original_name, mime_type, size, upload_time) VALUES (?1,?2,?3,?4,?5)')
-      .bind(session.target, session.filename, session.mime || mimeFromName(session.filename), size, now));
+    stmts.push(db.prepare('INSERT OR REPLACE INTO image_host (filename, original_name, mime_type, size, upload_time, db_id) VALUES (?1,?2,?3,?4,?5,?6)')
+      .bind(session.target, session.filename, session.mime || mimeFromName(session.filename), size, now, session.db_id || 1));
   } else {
     const sp = splitPath(session.target);
-    stmts.push(db.prepare('INSERT OR REPLACE INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7)')
-      .bind(sp.path, sp.parent, sp.name, size, mimeFromName(session.filename), now, total));
+    stmts.push(db.prepare('INSERT OR REPLACE INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7,?8)')
+      .bind(sp.path, sp.parent, sp.name, size, mimeFromName(session.filename), now, total, session.db_id || 1));
   }
   stmts.push(db.prepare('DELETE FROM upload_sessions WHERE id = ?1').bind(uploadId));
   await db.batch(stmts);
 
+  // ③ 用量记帐 (覆盖写只计净增: 同 key 的旧字节已被覆盖)
+  await bumpUsage(db, session.db_id || 1, size - (old && !old.is_dir ? old.size : 0));
+
   if (session.kind === 'image') {
     await invalidateIhCache(session.target);
+    await invalidateIhList();   // 新条目要立即出现在图床列表里 (列表缓存 30s)
     const r = buildUploadResponse(req, session.target, session.filename, session.mime || mimeFromName(session.filename));
     // 保持与文件上传一致的 done 语义, 同时保留图床原有的嵌入代码字段
     const payload = await r.json();
@@ -613,8 +682,11 @@ export async function uploadComplete(req, env, db) {
 
 // ---------------- 公共文件响应 (Range + 边缘缓存), 供 vfs/图床/分享复用 ----------------
 export async function serveFileContent(req, env, db, opts) {
-  // opts: {key, size, mime, filename, inline, cacheTtl, immutable, cacheKeyPrefix}
+  // opts: {key, size, mime, filename, inline, cacheTtl, immutable, cacheKeyPrefix, nchunks, db_id}
+  // db_id = 字节所在库; 缺省或 binding 不存在时回退主库
+  // (上线初期所有 db_id 都是 1, 行为与改造前完全一致)
   const { key, size, mime, filename } = opts;
+  const vdb = opts.db_id ? (dbById(env, opts.db_id) || db) : db;
   const disposition = contentDisposition(opts.inline ? 'inline' : 'attachment', filename);
   const baseHeaders = {
     'Content-Type': mime,
@@ -678,14 +750,14 @@ export async function serveFileContent(req, env, db, opts) {
   if (opts.nchunks != null) {
     if (opts.nchunks > 1) cs = deriveChunkSize(size, opts.nchunks);
   } else {
-    cs = deriveChunkSize(size, await chunkCount(db, key));
+    cs = deriveChunkSize(size, await chunkCount(vdb, key));
   }
   const startIdx = Math.floor(start / cs);
   const endIdx = Math.floor(Math.max(end, start) / cs);
   const headTrim = start - startIdx * cs;
   const tailKeep = range ? end - endIdx * cs + 1 : -1;
 
-  let body = blobStream(db, key, startIdx, endIdx);
+  let body = blobStream(vdb, key, startIdx, endIdx);
   if (headTrim > 0 || tailKeep >= 0) {
     body = trimStream(body, headTrim, tailKeep, endIdx - startIdx + 1);
   }
@@ -738,6 +810,7 @@ export async function downloadFile(req, env, db, url) {
   return serveFileContent(req, env, db, {
     key: 'f:' + node.path, size: node.size, mime: node.mime || mimeFromName(node.name),
     filename: node.name, inline, cacheTtl: 300, cacheKeyPrefix: 'priv', nchunks: node.nchunks,
+    db_id: node.db_id || 1,
   });
 }
 
@@ -753,7 +826,8 @@ export async function previewFile(req, env, db, url) {
     const textLimit = (ext === 'html' || ext === 'htm') ? 5 * 1024 * 1024 : 1024 * 1024;
     if (node.size > textLimit) return jerr('文件过大，无法预览，请下载查看');
     // 按 idx 聚合读取全部分片 (分片 512KB, 预览上限 5MB = 最多 10 行; 禁止 LIMIT 硬编码, 分片大小历史上改过)
-    const res = await db.prepare('SELECT idx, data FROM blobs WHERE key = ?1 ORDER BY idx').bind('f:' + node.path).all();
+    const vdb = dbOfNode(env, db, node);
+    const res = await vdb.prepare('SELECT idx, data FROM blobs WHERE key = ?1 ORDER BY idx').bind('f:' + node.path).all();
     const parts = (res.results || []).map((r) => new Uint8Array(r.data));
     const total = parts.reduce((s, p) => s + p.length, 0);
     const buf = new Uint8Array(total);
@@ -770,6 +844,7 @@ export async function previewFile(req, env, db, url) {
   return serveFileContent(req, env, db, {
     key: 'f:' + node.path, size: node.size, mime: node.mime || mimeFromName(node.name),
     filename: node.name, inline: true, cacheTtl: 300, cacheKeyPrefix: 'priv', nchunks: node.nchunks,
+    db_id: node.db_id || 1,
   });
 }
 
@@ -780,11 +855,14 @@ export async function thumbnail(req, env, db, url) {
   const path = sanitizeRel(url.searchParams.get('path') || '');
   const node = await getNode(db, path);
   if (!node || node.is_dir) return jerr('文件不存在', 404);
-  const row = await db.prepare('SELECT LENGTH(data) AS s FROM blobs WHERE key = ?1 AND idx = 0').bind('t:' + node.path).first();
+  // 缩略图与文件本体必须同库 (I1)
+  const vdb = dbOfNode(env, db, node);
+  const row = await vdb.prepare('SELECT LENGTH(data) AS s FROM blobs WHERE key = ?1 AND idx = 0').bind('t:' + node.path).first();
   if (!row) return jerr('缩略图不可用', 404);
   return serveFileContent(req, env, db, {
     key: 't:' + node.path, size: row.s, mime: 'image/jpeg',
     filename: node.name + '.thumb.jpg', inline: true, cacheTtl: 86400, cacheKeyPrefix: 'thumb',
+    db_id: node.db_id || 1,
   });
 }
 
@@ -800,7 +878,9 @@ export async function uploadThumbnail(req, env, db) {
   const data = new Uint8Array(await dataField.arrayBuffer());
   if (!data.length) return jerr('缩略图为空');
   if (data.length > 1024 * 1024) return jerr('缩略图过大');
-  await db.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) VALUES (?1, 0, ?2)').bind('t:' + node.path, data).run();
+  // 缩略图与文件本体同库 (I1)
+  const vdb = dbOfNode(env, db, node);
+  await vdb.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) VALUES (?1, 0, ?2)').bind('t:' + node.path, data).run();
   await invalidateFileCache(node.path, node.size);
   return json({ ok: true, size: data.length });
 }
@@ -840,7 +920,7 @@ export async function collectZipEntries(env, db, dirNode, zipMax) {
       if (totalSize > zipMax) return;
       const res = await serveFileContent(new Request('https://internal/fetch'), env, db, {
         key: 'f:' + node.path, size: node.size, mime: 'application/octet-stream',
-        filename: node.name, inline: true, nchunks: node.nchunks,
+        filename: node.name, inline: true, nchunks: node.nchunks, db_id: node.db_id || 1,
       });
       const { crc, size, replay } = await crcOfStream(res.body);
       entries.push({ name: prefix, size, crc, stream: replay() });
@@ -890,7 +970,7 @@ export async function batchDownload(req, env, db) {
     } else {
       const res = await serveFileContent(new Request('https://internal/fetch'), env, db, {
         key: 'f:' + node.path, size: node.size, mime: 'application/octet-stream',
-        filename: node.name, inline: true, nchunks: node.nchunks,
+        filename: node.name, inline: true, nchunks: node.nchunks, db_id: node.db_id || 1,
       });
       const { crc, size, replay } = await crcOfStream(res.body);
       entries.push({ name: node.name, size, crc, stream: replay() });
@@ -923,6 +1003,7 @@ export async function videoServe(req, env, db, url) {
   return serveFileContent(req, env, db, {
     key: 'f:' + node.path, size: node.size, mime: node.mime || mimeFromName(node.name),
     filename: node.name, inline: true, cacheTtl: 300, cacheKeyPrefix: 'priv',
+    db_id: node.db_id || 1,
   });
 }
 
@@ -935,6 +1016,12 @@ export async function invalidateIhCache(filename, extraKeys = []) {
     cacheDel(`IH:${filename}`),
     ...extraKeys.map((k) => cacheDel(k)),
   ]);
+}
+
+// 失效图床列表缓存 (IL:<page>:<page_size>:<search>)。
+// 搜索词参与键无法枚举, 只刷最常见的无搜索前几页 —— 与列表缓存 30s TTL 配合兜底。
+export async function invalidateIhList() {
+  await Promise.all([1, 2, 3].flatMap((p) => [24, 100].map((ps) => cacheDel(`IL:${p}:${ps}:`))));
 }
 
 function buildUploadResponse(req, filename, origName, mime) {

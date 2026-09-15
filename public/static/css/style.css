@@ -590,3 +590,36 @@ body.has-upload-launcher .upload-progress{bottom:80px}
 :root[data-theme="light"] .ih-card:hover{border-color:rgba(20,30,50,.25)}
 :root[data-theme="light"] ::-webkit-scrollbar-thumb{background:rgba(20,30,50,.18)}
 :root[data-theme="light"] ::-webkit-scrollbar-thumb:hover{background:rgba(20,30,50,.3)}
+
+/* ==================== 存储分库 (容量告警 / 存储库面板 / 主库横幅) ==================== */
+.st-lead { margin: 0 0 8px; font-size: 14px; line-height: 1.7; }
+.st-muted { color: #6b7280; font-size: 13px; line-height: 1.6; margin: 6px 0 0; }
+.st-box { margin-top: 14px; padding: 12px 14px; border-radius: 10px; background: rgba(59,130,246,.06); border: 1px solid rgba(59,130,246,.18); }
+.st-box-title { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.st-box p { margin: 6px 0 0; font-size: 13px; line-height: 1.7; }
+.st-list { margin: 6px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.8; }
+.st-steps { margin: 6px 0 0; padding-left: 20px; font-size: 13px; line-height: 1.8; }
+.st-steps li { margin-bottom: 10px; }
+.st-step-h { margin-bottom: 4px; }
+.st-cmd { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.st-cmd code { flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px; background: rgba(0,0,0,.05); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-x: auto; white-space: nowrap; }
+.st-copy { flex: none; padding: 4px 10px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(0,0,0,.15); background: transparent; cursor: pointer; }
+.st-copy:hover { background: rgba(0,0,0,.05); }
+.modal-actions { padding: 12px 20px 20px; text-align: right; }
+.modal-actions .btn + .btn { margin-left: 8px; }
+
+.storage-panel { margin-top: 4px; }
+.storage-loading, .st-err { font-size: 13px; color: #6b7280; padding: 8px 0; }
+.st-err { color: #dc2626; }
+.st-summary { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+.st-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.st-table th, .st-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid rgba(0,0,0,.08); white-space: nowrap; }
+.st-table th { color: #6b7280; font-weight: 500; }
+.st-warn { display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 5px; font-size: 11px; background: rgba(245,158,11,.15); color: #b45309; }
+.st-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+.st-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 1200; display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: #b91c1c; color: #fff; font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+.st-banner-text { flex: 1; min-width: 0; }
+.st-banner-btn { flex: none; padding: 3px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,.6); background: transparent; color: #fff; font-size: 12px; cursor: pointer; }
+.st-banner-btn:hover { background: rgba(255,255,255,.15); }
+.st-banner-close { flex: none; border: 0; background: transparent; color: #fff; font-size: 14px; cursor: pointer; line-height: 1; }

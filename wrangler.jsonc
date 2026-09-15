@@ -45,6 +45,13 @@
       // 手动部署时替换为 `wrangler d1 create file-manager` 输出的 database_id
       "database_id": "placeholder"
     }
+    // 存储分库（可选）: 空间不够时再加从库扩容。binding 名必须为 DB2、DB3 ...（数字递增）,
+    // 加完重新部署后, 到「参数设置 → 存储库 → 注册新库」登记即可, 详见 README「存储分库」。
+    // , {
+    //   "binding": "DB2",
+    //   "database_name": "file-manager-2",
+    //   "database_id": "wrangler d1 create file-manager-2 输出的 id"
+    // }
   ],
   // 可选: 自定义域名绑定（部署时自动创建 Custom Domain, 改成你账户内可用区域中的域名）
   // "routes": [
