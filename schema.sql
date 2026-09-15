@@ -124,3 +124,10 @@ CREATE INDEX IF NOT EXISTS idx_bj_db ON blob_journal(db_id);
 -- 账号总名额, 可按需调小）
 INSERT OR IGNORE INTO storage_dbs (id, binding, label, role, state, slot_quota, created_at)
 VALUES (1, 'DB', '主库', 'primary', 'active', 10, 1757904000000);
+
+-- 歌词拉黑(见 migrations/2026-09-16-lyrics-reject.sql)
+CREATE TABLE IF NOT EXISTS lyrics_reject (
+  path    TEXT PRIMARY KEY,
+  sources TEXT NOT NULL DEFAULT '[]',
+  ts      INTEGER NOT NULL
+);

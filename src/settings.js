@@ -4,6 +4,7 @@
 // (size, nchunks) 反推真实分片大小, 集合外的值会导致推导失败
 // ============================================================================
 import { jerr, json, cacheGet, cachePut, cacheDel } from './util.js';
+import * as auth from './auth.js';
 
 // 与 util.js deriveChunkSize 的候选集保持一致
 const CHUNK_CANDIDATES = [32768, 65536, 131072, 262144, 524288, 1048576];
@@ -20,6 +21,10 @@ const DEFAULTS = {
   // 代价是 CPU: 实测读 ~25~33ms CPU/MiB(D1 行 → 字节反序列化), 平台掐断点约 2.0s CPU
   // (= 60~90MiB), 故 8MiB 留 ~8x 余量。上限 32MiB 是因为超过它单次响应就接近掐断点。
   download_range:  8 * MB,
+  // 歌词: provider 是原文来源, trans_provider 是译文来源(目前只有网易云有译文字段)。
+  // netease_base 是自部署 NeteaseCloudMusicApi 的地址 —— 属"用户私有地址",
+  // 不随公开的 /api/settings 下发(见 publicOf), 登录态才单独补发。
+  lyrics: { enabled: true, provider: 'auto', trans_provider: 'off', netease_base: '' },
 };
 
 const DEVICE_KEYS = ['mobile', 'desktop'];
@@ -30,6 +35,8 @@ const MAX_RULES = 20;
 const RANGE_MAX = 2048 * MB; // 范围防御上限 2GB
 const DOWNLOAD_RANGE_MIN = 1 * MB;
 const DOWNLOAD_RANGE_MAX = 32 * MB;
+const LYRICS_PROVIDERS = ['auto', 'lrclib', 'lrc_cx', 'off'];
+const LYRICS_TRANS = ['off', 'netease'];
 
 function clampInt(v, min, max, fallback) {
   const n = parseInt(v, 10);
@@ -43,6 +50,13 @@ function normChunk(v, fallback) {
 function normConc(v, fallback) {
   const n = parseInt(v, 10);
   return Number.isFinite(n) ? Math.min(8, Math.max(1, n)) : fallback;
+}
+// 自部署地址: 只接受 http(s), 去掉尾部斜杠, 长度封顶
+function normBase(v) {
+  if (typeof v !== 'string') return '';
+  const s = v.trim().replace(/\/+$/, '');
+  if (!s || !/^https?:\/\/[^\s]+$/i.test(s)) return '';
+  return s.slice(0, 300);
 }
 
 // 把任意输入(部分字段)归一成合法完整设置; maxUpload = 服务端 MAX_UPLOAD_SIZE
@@ -81,7 +95,22 @@ function normalize(input, maxUpload) {
     }
   }
   out.download_range = clampInt(src.download_range, DOWNLOAD_RANGE_MIN, DOWNLOAD_RANGE_MAX, DEFAULTS.download_range);
+  const lyr = src.lyrics && typeof src.lyrics === 'object' ? src.lyrics : {};
+  out.lyrics = {
+    enabled: lyr.enabled !== false,
+    provider: LYRICS_PROVIDERS.includes(lyr.provider) ? lyr.provider : DEFAULTS.lyrics.provider,
+    trans_provider: LYRICS_TRANS.includes(lyr.trans_provider) ? lyr.trans_provider : DEFAULTS.lyrics.trans_provider,
+    netease_base: normBase(lyr.netease_base),
+  };
   return out;
+}
+
+// 公开视图: 抹掉私有字段。/api/settings 是公开接口(分享页未登录也读),
+// 不能把用户自部署的地址发给任何人。
+function publicOf(s) {
+  const o = JSON.parse(JSON.stringify(s));
+  if (o.lyrics) o.lyrics.netease_base = '';
+  return o;
 }
 
 async function readStored(db) {
@@ -122,14 +151,48 @@ export async function rangeMaxOf(env, db) {
   return v;
 }
 
-// GET /api/settings — 公开接口(分享页也读), 走边缘缓存 5 分钟, PUT 时主动失效
-export async function getSettings(_req, env, db) {
+// ---- 服务端读取歌词配置 ----
+// 同样记忆 30s。注意: 这里读到的是含 netease_base 的完整配置, 只供 Worker 内部使用。
+let LYRICS_MEMO = { v: null, exp: 0 };
+export function resetLyricsMemo() {
+  LYRICS_MEMO = { v: null, exp: 0 };
+}
+export async function lyricsConfigOf(env, db) {
+  const now = Date.now();
+  if (LYRICS_MEMO.v && now < LYRICS_MEMO.exp) return LYRICS_MEMO.v;
+  let v = DEFAULTS.lyrics;
+  try {
+    v = normalize(await readStored(db), maxUploadOf(env)).lyrics;
+  } catch { /* 表缺失等情况用默认 */ }
+  LYRICS_MEMO = { v, exp: now + 30000 };
+  return v;
+}
+
+// GET /api/settings — 公开接口(分享页也读), 走边缘缓存 5 分钟, PUT 时主动失效。
+// 缓存里存的是"脱敏版本"; 已登录时再单独补上私有字段, 否则设置页回填不出地址,
+// 用户改任一设置后全量提交就会把地址清空。
+export async function getSettings(req, env, db) {
   const cached = await cacheGet('app-settings');
-  if (cached) return cached;
-  const stored = await readStored(db);
-  const payload = JSON.stringify({ settings: normalize(stored, maxUploadOf(env)), max_upload_size: maxUploadOf(env) });
-  // 缓存与响应用各自独立的 Response (cachePut 会消费传入的 body 流)
-  await cachePut('app-settings', new Response(payload), 300);
+  let payload = null;
+  if (cached) {
+    payload = await cached.text();
+  } else {
+    const stored = await readStored(db);
+    payload = JSON.stringify({ settings: publicOf(normalize(stored, maxUploadOf(env))), max_upload_size: maxUploadOf(env) });
+    await cachePut('app-settings', new Response(payload), 300);
+  }
+  try {
+    const denied = await auth.checkAuth(req, env);
+    if (!denied) {
+      const stored = await readStored(db);
+      const base = normalize(stored, maxUploadOf(env)).lyrics.netease_base;
+      if (base) {
+        const o = JSON.parse(payload);
+        if (o.settings && o.settings.lyrics) o.settings.lyrics.netease_base = base;
+        payload = JSON.stringify(o);
+      }
+    }
+  } catch { /* 鉴权异常按未登录处理, 不下发私有字段 */ }
   return new Response(payload, { headers: { 'Content-Type': 'application/json; charset=utf-8' } });
 }
 
@@ -150,5 +213,6 @@ export async function saveSettings(req, env, db) {
   }
   await cacheDel('app-settings');
   resetRangeMemo(); // 新窗口立即生效, 不必等 30s 记忆过期
+  resetLyricsMemo();
   return json({ settings: JSON.parse(value) });
 }

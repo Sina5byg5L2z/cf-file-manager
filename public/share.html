@@ -204,8 +204,9 @@
                     'dockerfile','makefile','gitignore','editorconfig','env'].includes(ext);
         }
 
+        // 扩展名兜底清单与服务端 MIME_MAP 对齐 (目录列表不返回 mime 时用)
         function isPreviewableImage(ext) {
-            return ['jpg','jpeg','png','gif','webp','bmp','ico'].includes(ext);
+            return ['jpg','jpeg','png','gif','webp','bmp','ico','avif','tiff'].includes(ext);
         }
 
         function isPreviewableSvg(ext) {
@@ -213,11 +214,11 @@
         }
 
         function isPreviewableVideo(ext) {
-            return ['mp4','webm','ogg'].includes(ext);
+            return ['mp4','webm','mov','mkv','avi','flv','wmv','m4v'].includes(ext);
         }
 
         function isPreviewableAudio(ext) {
-            return ['mp3','wav','ogg','flac','aac','m4a'].includes(ext);
+            return ['mp3','wav','ogg','oga','flac','aac','m4a','opus','wma'].includes(ext);
         }
 
         function isPreviewablePdf(ext) {
@@ -238,6 +239,32 @@
                     'sh','bash','css','less','scss','sass'].includes(ext);
         }
 
+        // 预览分类: 与管理页一致 —— 优先用服务端下发的 mime (目录列表接口不返回 mime, 退回扩展名)。
+        // 分类决定"要不要套用预览上限": 只有 text/markdown/html/svg 需要把全文拉进内存再渲染,
+        // 才受「参数设置 → 预览上限」约束; 图片/视频/音频/PDF 由浏览器原生流式取用, 不设门槛。
+        function previewKind(ext, mime) {
+            var m = String(mime || '').toLowerCase().split(';')[0].trim();
+            if (m === 'image/svg+xml') return 'svg';
+            if (m === 'application/pdf') return 'pdf';
+            if (m.indexOf('image/') === 0) return 'image';
+            if (m.indexOf('video/') === 0) return 'video';
+            if (m.indexOf('audio/') === 0) return 'audio';
+            if (m === 'text/markdown' || m === 'text/x-markdown') return 'markdown';
+            if (m === 'text/html' || m === 'application/xhtml+xml') return 'html';
+            if (isPreviewableSvg(ext)) return 'svg';
+            if (isPreviewableImage(ext)) return 'image';
+            if (isPreviewableVideo(ext)) return 'video';
+            if (isPreviewableAudio(ext)) return 'audio';
+            if (isPreviewablePdf(ext)) return 'pdf';
+            if (isPreviewableMarkdown(ext)) return 'markdown';
+            if (isPreviewableHtml(ext)) return 'html';
+            if (isPreviewableText(ext)) return 'text';
+            return 'unknown';
+        }
+
+        // 目录列表没有 mime, 这里按扩展名判断"值不值得给预览按钮"
+        function canPreview(ext) { return previewKind(ext, '') !== 'unknown'; }
+
         // highlight.js language mapping
         var hljsLangMap = {
             'js':'javascript','ts':'typescript','jsx':'javascript',
@@ -255,11 +282,6 @@
             'csv':'plaintext','tsv':'plaintext','log':'plaintext','txt':'plaintext'
         };
 
-        function canPreview(ext) {
-            return isPreviewableText(ext) || isPreviewableImage(ext) || isPreviewableSvg(ext) ||
-                   isPreviewableVideo(ext) || isPreviewableAudio(ext) || isPreviewablePdf(ext) ||
-                   isPreviewableMarkdown(ext) || isPreviewableHtml(ext);
-        }
 
         async function fetchData(subPath, password) {
             let url = '/s/' + shareId + '?data=1';
@@ -427,12 +449,12 @@
 
             const previewBtn = document.getElementById('btnPreview');
             if (previewBtn) {
-                previewBtn.onclick = () => showPreview(data.name, ext, data.size);
+                previewBtn.onclick = () => showPreview(data.name, ext, data.size, data.mime);
             }
 
             // Auto-preview for images, SVG, PDF, Markdown
             if (isPreviewableImage(ext) || isPreviewableSvg(ext) || isPreviewablePdf(ext) || isPreviewableMarkdown(ext)) {
-                showPreview(data.name, ext, data.size);
+                showPreview(data.name, ext, data.size, data.mime);
             }
         }
 
@@ -471,7 +493,7 @@
             document.getElementById('btnBack').onclick = function() { renderDirectory({ entries: dirEntries, name: currentSubPath || currentPath || '分享文件' }); };
             document.getElementById('btnDownload').onclick = function() { downloadFile(name); };
 
-            showPreview(name, ext, entry ? entry.size : 0);
+            showPreview(name, ext, entry ? entry.size : 0, entry ? entry.mime : '');
         }
 
         // Markdown rendering: marked + DOMPurify (vendor: /static/vendor/)
@@ -544,44 +566,63 @@
         }
 
         // 设置异步加载: 先等加载完再判断阈值, 避免首屏用默认值误判 (所有调用点共用此入口)
-        function showPreview(name, ext, size) {
-            AppSettings.ready.then(function () { _showPreview(name, ext, size); });
+        function showPreview(name, ext, size, mime) {
+            AppSettings.ready.then(function () { _showPreview(name, ext, size, mime); });
         }
 
-        function _showPreview(name, ext, size) {
+        // 不给预览时的占位卡: reason = 'too-large'(文本超阈值) | 'unsupported'(类型不支持)
+        function showNoPreview(area, name, reason, size, ext) {
+            var title = reason === 'too-large' ? '文件过大，已停用在线预览' : '此文件类型不支持预览';
+            var hint = reason === 'too-large'
+                ? formatSize(size) + ' · 预览大文本会导致页面卡顿，请下载后查看'
+                : '文件格式: ' + (ext || '未知');
+            area.innerHTML = '<div style="padding:40px 20px;text-align:center">' +
+                '<p style="font-weight:600;margin-bottom:8px">' + esc(title) + '</p>' +
+                '<p style="color:var(--text-tertiary);font-size:13px;margin-bottom:16px">' + esc(hint) + '</p>' +
+                '<button class="btn btn-primary" id="btnNoPreviewDownload">下载文件</button></div>';
+            var btn = document.getElementById('btnNoPreviewDownload');
+            if (btn) btn.onclick = function() { downloadFile(name); };
+        }
+
+        function _showPreview(name, ext, size, mime) {
             var area = document.getElementById('previewArea');
             if (!area) return;
             area.style.display = 'block';
 
-            // 大文本不做预览: 全量拉取+渲染会卡死主线程, 直接引导下载 (md 渲染 DOM 膨胀大, 阈值更严; HTML 渲染走 iframe 异步解析, 放宽)
-            size = size || 0;
-            var tooLargeLimit = isPreviewableMarkdown(ext) ? AppSettings.previewLimit('preview_markdown')
-                : (isPreviewableHtml(ext) ? AppSettings.previewLimit('preview_html')
-                : (isPreviewableSvg(ext) || isPreviewableText(ext) ? AppSettings.previewLimit('preview_text') : 0));
-            if (size > tooLargeLimit) {
-                area.innerHTML = '<div style="padding:40px 20px;text-align:center">' +
-                    '<p style="font-weight:600;margin-bottom:8px">文件过大，已停用在线预览</p>' +
-                    '<p style="color:var(--text-tertiary);font-size:13px;margin-bottom:16px">预览大文本会导致页面卡顿，请下载后查看</p>' +
-                    '<button class="btn btn-primary" id="btnTooLargeDownload">下载文件</button></div>';
-                document.getElementById('btnTooLargeDownload').onclick = function() { downloadFile(name); };
-                return;
-            }
-
             // Tear down a previous custom video player (frees its listeners)
             if (window._sharePlayer) { try { window._sharePlayer.destroy(); } catch (e) {} window._sharePlayer = null; }
 
-            var fileUrl = '/s/' + shareId + '?download=1&name=' + encodeURIComponent(name);
+            size = size || 0;
+            var kind = previewKind(ext, mime);
+
+            // 只有文本类受预览上限约束: 全量拉取 + 渲染会卡死主线程, 超限直接引导下载
+            // (md 渲染 DOM 膨胀大, 阈值更严; HTML 走 iframe 异步解析, 放宽)。
+            // 图片/视频/音频/PDF 是浏览器原生流式取用, 与文件管理页一致 —— 任意大小都可查看,
+            // 不能拿文本阈值卡它们 (否则明明能播却被判"文件过大")。
+            if (kind === 'markdown' || kind === 'html' || kind === 'svg' || kind === 'text') {
+                var limit = kind === 'markdown' ? AppSettings.previewLimit('preview_markdown')
+                    : (kind === 'html' ? AppSettings.previewLimit('preview_html')
+                    : AppSettings.previewLimit('preview_text'));
+                if (size > limit) {
+                    showNoPreview(area, name, 'too-large', size, ext);
+                    return;
+                }
+            }
+
+            // 内联预览用 inline=1 (服务端回 inline 型 Content-Disposition),
+            // 与下载用的 download=1 区分: PDF 在 iframe 里遇 attachment 会被浏览器当下载
+            var fileUrl = '/s/' + shareId + '?inline=1&name=' + encodeURIComponent(name);
             if (currentSubPath) fileUrl += '&sub_path=' + encodeURIComponent(currentSubPath);
             if (currentPassword) fileUrl += '&password=' + encodeURIComponent(currentPassword);
 
             // Image
-            if (isPreviewableImage(ext)) {
+            if (kind === 'image') {
                 area.innerHTML = '<div style="text-align:center;padding:8px"><img src="' + fileUrl + '" alt="' + esc(name) + '" style="max-width:100%"></div>';
                 return;
             }
 
             // SVG — inline render
-            if (isPreviewableSvg(ext)) {
+            if (kind === 'svg') {
                 area.innerHTML = '<div class="loading"><div class="spinner"></div> 加载预览...</div>';
                 fetch(fileUrl).then(function(r) { return r.text(); }).then(function(text) {
                     area.innerHTML = '<div style="text-align:center;padding:16px;background:#fff">' + text + '</div>';
@@ -592,7 +633,7 @@
             }
 
             // Video — custom player (Bilibili-style skin + gestures + resolution)
-            if (isPreviewableVideo(ext)) {
+            if (kind === 'video') {
                 area.innerHTML = '<div class="vp-host"></div>';
                 var qbase = '/s/' + shareId + '?name=' + encodeURIComponent(name);
                 if (currentSubPath) qbase += '&sub_path=' + encodeURIComponent(currentSubPath);
@@ -615,20 +656,20 @@
             }
 
             // Audio — custom player card
-            if (isPreviewableAudio(ext)) {
+            if (kind === 'audio') {
                 area.innerHTML = '<div class="vp-host" style="padding:16px 8px"></div>';
                 window._sharePlayer = AudioPlayer.create(area.querySelector('.vp-host'), fileUrl, { title: name, onDownload: function () { downloadFile(name); } });
                 return;
             }
 
             // PDF
-            if (isPreviewablePdf(ext)) {
+            if (kind === 'pdf') {
                 area.innerHTML = '<iframe src="' + fileUrl + '" style="width:100%;height:600px;border:none"></iframe>';
                 return;
             }
 
             // Markdown
-            if (isPreviewableMarkdown(ext)) {
+            if (kind === 'markdown') {
                 area.innerHTML = '<div class="loading"><div class="spinner"></div> 加载预览...</div>';
                 fetch(fileUrl).then(function(r) { return r.text(); }).then(function(text) {
                     var rendered = renderMarkdown(text);
@@ -656,7 +697,7 @@
             }
 
             // HTML — sandboxed iframe
-            if (isPreviewableHtml(ext)) {
+            if (kind === 'html') {
                 area.innerHTML = '<div class="loading"><div class="spinner"></div> 加载预览...</div>';
                 fetch(fileUrl).then(function(r) { return r.text(); }).then(function(text) {
                     // 源码视图属于文本阅读: 超过文本上限直接不提供入口, 只留 iframe 渲染
@@ -702,7 +743,7 @@
             }
 
             // Text / Code
-            if (isPreviewableText(ext)) {
+            if (kind === 'text') {
                 area.innerHTML = '<div class="loading"><div class="spinner"></div> 加载预览...</div>';
                 fetch(fileUrl).then(function(r) { return r.text(); }).then(function(text) {
                     // 显示层截断: 只渲染前 128KB, 保证预览绝对流畅, 完整内容下载查看
@@ -720,6 +761,9 @@
                 });
                 return;
             }
+
+            // 其余类型: 明确"不支持预览", 不再混用"文件过大"的说法误导用户
+            showNoPreview(area, name, 'unsupported', size, ext);
         }
 
         // Download with debouncing

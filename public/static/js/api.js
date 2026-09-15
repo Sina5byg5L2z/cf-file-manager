@@ -322,6 +322,43 @@ const API = {
     videoPrepare(path, quality) { return this.json('GET', `/api/video/prepare?path=${encodeURIComponent(path)}&quality=${quality}`); },
     videoUrl(path, quality) { return `/api/video?path=${encodeURIComponent(path)}&quality=${quality}&token=${this.token}`; },
 
+    // Music — 歌曲元数据 (用户编辑的标题/歌手/歌词, 覆盖内嵌标签与文件名)
+    trackMeta(path) { return this.json('GET', `/api/track/meta?path=${encodeURIComponent(path)}`); },
+    saveTrackMeta(payload) { return this.json('PUT', '/api/track/meta', payload); },
+    // Music — 歌词代理 (Worker 转发, 前端另有 IndexedDB 缓存)
+    lyrics(path, opts = {}) {
+        const p = new URLSearchParams({ path });
+        if (opts.duration) p.set('duration', String(Math.round(opts.duration)));
+        if (opts.title) p.set('title', opts.title);
+        if (opts.artist) p.set('artist', opts.artist);
+        return this.json('GET', `/api/lyrics?${p}`);
+    },
+    // 歌词拉黑: source 省略且 all=true → 链上剩余来源全部拉黑; duration/title/artist 供服务端清缓存定位键
+    lyricsReject(path, opts = {}) {
+        return this.json('POST', '/api/lyrics/reject', {
+            path,
+            source: opts.source || '',
+            all: !!opts.all,
+            duration: opts.duration || 0,
+            title: opts.title || '',
+            artist: opts.artist || '',
+        });
+    },
+    lyricsUnreject(path, opts = {}) {
+        const p = new URLSearchParams({ path });
+        if (opts.duration) p.set('duration', String(Math.round(opts.duration)));
+        if (opts.title) p.set('title', opts.title);
+        if (opts.artist) p.set('artist', opts.artist);
+        return this.request('DELETE', `/api/lyrics/reject?${p}`);
+    },
+    // 专辑封面在线查找(内嵌封面缺失时的兜底): 网易云(自部署) > Deezer > iTunes, Worker 侧缓存
+    cover(path, opts = {}) {
+        const p = new URLSearchParams({ path });
+        if (opts.title) p.set('title', opts.title);
+        if (opts.artist) p.set('artist', opts.artist);
+        return this.json('GET', `/api/cover?${p}`);
+    },
+
     // Search
     search(q, path = '') { return this.json('GET', `/api/search?q=${encodeURIComponent(q)}&path=${encodeURIComponent(path)}`); },
 
@@ -362,3 +399,7 @@ const API = {
     listShares() { return this.json('GET', '/api/shares'); },
     deleteShare(id) { return this.request('DELETE', `/api/share/${id}`); },
 };
+
+// 顶层 const 不进 window —— 跨文件(trackmeta.js / musicplayer.js 里的 global.API)
+// 必须靠这里显式挂载, 否则永远 undefined
+window.API = API;

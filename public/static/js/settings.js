@@ -10,6 +10,8 @@ const AppSettings = {
         preview_markdown: { mobile: 262144,   desktop: 524288 },
         preview_html:     { mobile: 1048576,  desktop: 5242880 },
         download_range:   8388608,   // 单次下载窗口(字节): 服务端 Range 上限 = 页面内分片下载每段大小
+        // 歌词: provider=原文来源, trans_provider=译文来源, netease_base=自部署地址(仅登录态下发)
+        lyrics: { enabled: true, provider: 'auto', trans_provider: 'off', netease_base: '' },
     },
 
     data: null,        // 服务端加载成功后的完整设置; null = 未加载(用默认)
@@ -38,6 +40,18 @@ const AppSettings = {
     downloadRange() {
         const v = parseInt(this.merged().download_range, 10);
         return Number.isFinite(v) && v >= 1048576 ? v : this.defaults.download_range;
+    },
+
+    // 歌词配置: 未加载/异常时退回默认(全部关闭以外的保守值: 仅原文)
+    lyrics() {
+        const l = this.merged().lyrics;
+        if (!l || typeof l !== 'object') return this.defaults.lyrics;
+        return {
+            enabled: l.enabled !== false,
+            provider: l.provider || 'auto',
+            trans_provider: l.trans_provider || 'off',
+            netease_base: typeof l.netease_base === 'string' ? l.netease_base : '',
+        };
     },
 
     // 用原生 fetch (管理页/分享页通用; 分享页无 api.js 与 token, GET 本就是公开接口)
@@ -259,6 +273,11 @@ const SettingsUI = {
         document.getElementById('setDeviceHint').textContent =
             AppSettings.isMobile ? '当前设备按「移动端」档生效' : '当前设备按「电脑端」档生效';
         this._mb('setDownloadRange').value = String(Math.round(AppSettings.downloadRange() / 1048576 * 100) / 100);
+        const lyr = AppSettings.lyrics();
+        this._mb('setLyricsEnabled').checked = lyr.enabled;
+        this._mb('setLyricsProvider').value = lyr.provider;
+        this._mb('setLyricsTrans').value = lyr.trans_provider;
+        this._mb('setNeteaseBase').value = lyr.netease_base;
         document.getElementById('setError').style.display = 'none';
         this.modal.style.display = 'flex';
         // 存储分库面板 (库清单 / 名额 / 一键扩容) 随设置弹窗一起加载
@@ -281,6 +300,21 @@ const SettingsUI = {
         return out;
     },
 
+    // 收集歌词设置: 地址去尾部斜杠; 选了译文源却没填地址 → 直接报错而不是静默降级
+    collectLyrics() {
+        const base = String(this._mb('setNeteaseBase').value || '').trim().replace(/\/+$/, '');
+        const trans = this._mb('setLyricsTrans').value;
+        if (trans === 'netease' && !/^https?:\/\/\S+$/i.test(base)) {
+            throw new Error('译文来源选了「网易云」，必须填写自部署 API 地址（http/https 开头）');
+        }
+        return {
+            enabled: this._mb('setLyricsEnabled').checked,
+            provider: this._mb('setLyricsProvider').value,
+            trans_provider: trans,
+            netease_base: base,
+        };
+    },
+
     async save() {
         const err = document.getElementById('setError');
         err.style.display = 'none';
@@ -297,6 +331,7 @@ const SettingsUI = {
                 preview_markdown: { mobile: readMB('set_preview_markdown_mobile') * 1048576, desktop: readMB('set_preview_markdown_desktop') * 1048576 },
                 preview_html:     { mobile: readMB('set_preview_html_mobile') * 1048576, desktop: readMB('set_preview_html_desktop') * 1048576 },
                 download_range:   Math.round(readMB('setDownloadRange') * 1048576),
+                lyrics:           this.collectLyrics(),
             };
             if (!Number.isFinite(settings.upload_limit.mobile) || !Number.isFinite(settings.upload_limit.desktop)
                 || Object.values(settings.preview_text).concat(Object.values(settings.preview_markdown), Object.values(settings.preview_html))

@@ -377,8 +377,14 @@ const Preview = {
             return;
         }
 
-        // Audio — custom player card
+        // Audio — 交给全局播放器: 关掉弹窗也能继续播放, 还能带歌词与队列。
+        // 弹窗里不再内嵌播放器(它会随弹窗关闭而停止)。MusicPlayer 缺失时回退到旧卡片。
         if (mime.startsWith('audio/')) {
+            if (typeof MusicPlayer !== 'undefined') {
+                this.hide();
+                MusicPlayer.open(path, entry.name);
+                return;
+            }
             this.body.innerHTML = `<div class="preview-content preview-audio-host"></div>`;
             const host = this.body.querySelector('.preview-audio-host');
             this.mediaPlayer = AudioPlayer.create(host, url, { title: entry.name, onDownload: () => this.download() });

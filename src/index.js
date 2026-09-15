@@ -12,6 +12,8 @@ import * as dav from './webdav.js';
 import * as settings from './settings.js';
 import * as storageApi from './storage.js';
 import * as blobops from './blobops.js';
+import * as lyrics from './lyrics.js';
+import * as trackmeta from './trackmeta.js';
 
 export default {
   async fetch(request, env, ctx) {
@@ -66,7 +68,9 @@ async function route(request, env, ctx) {
   const shareMatch = path.match(/^\/s\/([A-Za-z0-9]+)$/);
   if (shareMatch && method === 'GET') {
     const url2 = new URL(request.url);
-    const actionable = ['data', 'download', 'thumb', 'sub_path', 'quality', 'prepare', 'qualities']
+    // inline = 页内预览通道 (图片/视频/PDF 等), 必须回 inline 型 Content-Disposition,
+    // 与 download 的 attachment 区分开; 缺了它请求会被当成纯页面返回 share.html
+    const actionable = ['data', 'download', 'inline', 'thumb', 'sub_path', 'quality', 'prepare', 'qualities']
       .some((k) => url2.searchParams.has(k));
     if (!actionable) return assets(request, env, '/share.html');
     return share.accessShare(request, env, db, shareMatch[1], url2);
@@ -137,6 +141,15 @@ async function route(request, env, ctx) {
   if (path === '/api/thumbnail' && method === 'GET') return vfs.thumbnail(request, env, db, url);
   if (path === '/api/thumbnail' && method === 'POST') return vfs.uploadThumbnail(request, env, db);
   if (path === '/api/search' && method === 'GET') return vfs.searchFiles(request, env, db, url);
+
+  // 音乐: 歌曲元数据 (用户编辑的标题/歌手/歌词, 覆盖内嵌标签与文件名)
+  if (path === '/api/track/meta' && method === 'GET') return trackmeta.getMeta(request, env, db, url);
+  if (path === '/api/track/meta' && method === 'PUT') return trackmeta.putMeta(request, env, db);
+  // 音乐: 歌词代理 (Worker 转发, 统一 UA/超时/降级/缓存)
+  if (path === '/api/lyrics' && method === 'GET') return lyrics.getLyrics(request, env, db, url);
+  if (path === '/api/lyrics/reject' && method === 'POST') return lyrics.rejectLyrics(request, env, db);
+  if (path === '/api/lyrics/reject' && method === 'DELETE') return lyrics.unRejectLyrics(request, env, db, url);
+  if (path === '/api/cover' && method === 'GET') return lyrics.getCover(request, env, db, url);
 
   // 视频清晰度 (降级: 仅原片)
   if (path === '/api/video/qualities' && method === 'GET') return vfs.videoQualities(request, env, db, url);

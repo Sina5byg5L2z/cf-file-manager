@@ -169,17 +169,33 @@ export async function accessShare(req, env, db, id, url) {
     });
   }
 
-  // ---- 下载单文件 ----
-  if (q.has('download') && q.get('download') !== 'zip') {
+  // 定位单文件目标: 目录分享时按 name 下钻, 其余就是分享对象本身
+  async function resolveFileTarget() {
     let target = node;
     if (node.is_dir && name) {
       const t = resolveWithin(null, name);
-      if (!t) return jerr('无效的文件');
+      if (!t) return null;
       target = await getNode(db, t);
-      if (!target || target.is_dir) return jerr('无效的文件');
+      if (!target || target.is_dir) return null;
     } else if (node.is_dir) {
-      return jerr('无效的文件');
+      return null;
     }
+    return target;
+  }
+
+  // ---- 内联预览 (图片 / 视频 / 音频 / PDF) ----
+  // 与管理页 /api/preview 对齐: 内联展示必须回 inline 型 Content-Disposition,
+  // 否则 Chrome 会把 iframe 里的 PDF 当附件下载, 表现为"能看却不给看"。
+  if (q.has('inline')) {
+    const target = await resolveFileTarget();
+    if (!target) return jerr('无效的文件');
+    return serveShareNode(req, env, db, target, true);
+  }
+
+  // ---- 下载单文件 ----
+  if (q.has('download') && q.get('download') !== 'zip') {
+    const target = await resolveFileTarget();
+    if (!target) return jerr('无效的文件');
     return serveShareNode(req, env, db, target, false);
   }
 
