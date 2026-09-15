@@ -65,7 +65,8 @@ const Preview = {
         this.title = document.getElementById('previewTitle');
         this.info = document.getElementById('previewInfo');
         document.getElementById('btnClosePreview').addEventListener('click', () => this.hide());
-        this.modal.addEventListener('click', (e) => { if (e.target === this.modal) this.hide(); });
+        // 不做"点击遮罩/空白处关闭": 播放音视频时误点弹窗外会直接打断播放,
+        // 关闭只走右上角 ✕ 按钮和 ESC 键
 
         // 新标签页打开
         document.getElementById('btnPreviewNewTab').addEventListener('click', () => {
