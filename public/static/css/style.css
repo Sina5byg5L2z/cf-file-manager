@@ -662,16 +662,17 @@ body.has-upload-launcher .upload-progress{bottom:80px}
 .mp-modes { display: flex; gap: 8px; margin-bottom: 12px; }
 .mp-chip { border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; }
 .mp-chip.on { background: var(--accent-subtle); border-color: var(--accent); color: var(--accent); }
-.mp-lyrics { flex: 1; overflow-y: auto; padding-right: 8px; scroll-behavior: smooth; position: relative; }
+.mp-lyrics { flex: 1; overflow-y: auto; padding-right: 8px; scroll-behavior: smooth; position: relative; font-size: 15px; }
 .mp-row { padding: 8px 10px; border-radius: 8px; cursor: pointer; }
 .mp-row:hover { background: var(--hover-bg); }
-.mp-row.active .mp-line { color: var(--text-primary); font-weight: 500; }
-.mp-line { font-size: 14px; line-height: 1.7; color: var(--text-tertiary); transition: color .15s; }
-.mp-trans { font-size: 12px; color: var(--text-secondary); }
-.mp-roma { font-size: 11px; color: var(--text-tertiary); }
+.mp-row.active .mp-line { color: var(--text-primary); font-weight: 500; font-size: inherit; }
+.mp-line { font-size: inherit; line-height: 1.7; color: var(--text-tertiary); transition: color .15s; }
+.mp-trans { font-size: 0.82em; color: var(--text-secondary); }
+.mp-roma { font-size: 0.74em; color: var(--text-tertiary); }
 .mp-lyric-empty { padding: 40px 0; text-align: center; font-size: 13px; color: var(--text-tertiary); }
 .mp-lyric-empty .mp-btn { margin-top: 12px; }
-.mp-offset { display: flex; align-items: center; gap: 10px; padding-top: 12px; margin-top: 10px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); }
+.mp-offset { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding-top: 12px; margin-top: 10px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); }
+.mp-ofs-gap { flex: 1 1 12px; }
 
 .mp-panel { position: fixed; right: 20px; bottom: 70px; z-index: 1170; width: 340px; max-height: 60vh; overflow-y: auto; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
 .mp-panel-head { padding: 12px 16px; font-size: 13px; font-weight: 500; color: var(--text-primary); border-bottom: 1px solid var(--border); }
@@ -693,4 +694,64 @@ body.has-upload-launcher .upload-progress{bottom:80px}
     .mp-bigcover { max-width: 240px; }
     .mp-bar-left, .mp-bar-right { width: auto; }
     .mp-vol { display: none; }
+}
+
+/* ---- 播放器移动端适配 (≤640px) ---- */
+@media (max-width: 640px) {
+    /* 底栏: 两行。第一行 标题+入口按钮, 第二行 控制键+进度; 音量条隐藏(交给系统音量键) */
+    .mp-bar {
+        flex-wrap: wrap;
+        gap: 6px 12px;
+        padding: 8px 12px;
+        padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    }
+    .mp-bar-left { width: auto; flex: 1 1 0; }
+    .mp-bar-right { width: auto; flex: none; }
+    .mp-bar-right .mp-vol { display: none; }
+    .mp-bar-center { flex: 1 1 100%; order: 3; }
+    .mp-btns { gap: 18px; }
+    .mp-btn { padding: 6px 11px; }
+    .mp-btn svg { width: 17px; height: 17px; }
+    .mp-play { width: 44px; height: 36px; }
+
+    /* 面板(队列/歌曲信息): 左右贴边, 抬到两行底栏之上 */
+    .mp-panel {
+        left: 12px;
+        right: 12px;
+        width: auto;
+        bottom: calc(130px + env(safe-area-inset-bottom, 0px));
+        max-height: 55vh;
+    }
+
+    .mp-ofs-gap { display: none; }   /* 偏移组与字号组各自成行 */
+
+    /* 歌词页: 重排为「紧凑头部 + 歌词占满剩余高度」。
+       根因: ≤900px 规则让 body 变整页滚动, 歌词 flex:1 无固定高度可填 → 区域塌矮。
+       移动端改为 body 不滚动(overflow:hidden), 左栏压成一行(小封面+标题), 歌词内部滚动。 */
+    .mp-full-head { padding: 8px 12px; }
+    .mp-full-body {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+        gap: 10px;
+    }
+    .mp-full-left {
+        display: grid;
+        grid-template-columns: 88px minmax(0, 1fr);
+        grid-template-rows: auto auto;
+        column-gap: 12px;
+        row-gap: 2px;
+        align-items: center;
+    }
+    .mp-bigcover { grid-row: 1 / 3; width: 88px; max-width: none; aspect-ratio: 1; border-radius: 10px; }
+    .mp-meta-title { grid-column: 2; margin-top: 0; }
+    .mp-meta-sub { grid-column: 2; margin-top: 0; }
+    .mp-full-ctrls { grid-column: 1 / 3; margin-top: 8px; }
+    .mp-full-ctrls .mp-btn { padding: 8px 12px; }
+    .mp-full-right { flex: 1 1 0; min-height: 0; }
+    .mp-lyrics { flex: 1 1 0; min-height: 0; }
+    .mp-modes { margin-bottom: 0; flex-wrap: wrap; }
+    .mp-offset { padding-top: 8px; margin-top: 8px; gap: 6px; }
+    .mp-ofs-label { display: none; }   /* 隐藏"字号"文字, 让 T−/T+ 收进一行 */
 }

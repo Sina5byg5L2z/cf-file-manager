@@ -42,6 +42,7 @@
         rates: [0.75, 1, 1.25, 1.5, 2],
         rateIdx: 1,
         seeking: false,
+        lyricFont: 15,   // 歌词字号(px), T+/T- 调整, localStorage 持久化
     };
     var booted = false;
 
@@ -116,6 +117,11 @@
             '        <button class="mp-btn" data-act="ofs-">−0.5s</button>',
             '        <span id="mpOfsVal">0ms</span>',
             '        <button class="mp-btn" data-act="ofs+">+0.5s</button>',
+            '        <span class="mp-ofs-gap"></span>',
+            '        <span class="mp-ofs-label">字号</span>',
+            '        <button class="mp-btn" data-act="font-" title="缩小歌词">T−</button>',
+            '        <span id="mpFontVal">15px</span>',
+            '        <button class="mp-btn" data-act="font+" title="放大歌词">T+</button>',
             '      </div>',
             '    </div>',
             '  </div>',
@@ -163,6 +169,8 @@
         el.queue = q('#mpQueue');
         el.queueList = q('#mpQueueList');
         el.info = q('#mpInfo');
+        el.fontVal = q('#mpFontVal');
+        try { state.lyricFont = Math.min(30, Math.max(11, parseInt(localStorage.getItem('mp-lyric-font'), 10) || 15)); } catch (e) {}
 
         audio = new Audio();
         audio.preload = 'metadata';
@@ -170,6 +178,7 @@
         el.vol.value = String(audio.volume);
 
         bind();
+        applyLyricFont();
     }
 
     function bind() {
@@ -200,6 +209,8 @@
             else if (act === 'refetch') refetchLyrics();
             else if (act === 'ofs-') adjustOffset(-500);
             else if (act === 'ofs+') adjustOffset(500);
+            else if (act === 'font-') adjustFont(-1);
+            else if (act === 'font+') adjustFont(1);
             else if (act === 'reject') rejectLyric();
             else if (act === 'unreject') unRejectLyric();
         });
@@ -598,6 +609,19 @@
             var msg = '保存失败：' + ((e && e.message) || '未知错误');
             if (global.Dialog && global.Dialog.alert) global.Dialog.alert(msg); else alert(msg);
         });
+    }
+
+    // ---------------- 歌词字号 ----------------
+    function adjustFont(delta) {
+        var v = Math.min(30, Math.max(11, state.lyricFont + delta));
+        if (v === state.lyricFont) return;
+        state.lyricFont = v;
+        applyLyricFont();
+    }
+    function applyLyricFont() {
+        el.lyrics.style.fontSize = state.lyricFont + 'px';
+        if (el.fontVal) el.fontVal.textContent = state.lyricFont + 'px';
+        try { localStorage.setItem('mp-lyric-font', String(state.lyricFont)); } catch (e) {}
     }
 
     function reparseFromName() {
