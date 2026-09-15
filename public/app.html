@@ -147,6 +147,16 @@
         <div id="uploadList" class="upload-list"></div>
     </div>
 
+    <!-- 未完成上传的悬浮入口 (仅存在未完成任务时显示) -->
+    <button id="uploadLauncher" class="upload-launcher" style="display:none" title="有未完成的上传，点击查看">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <span class="upload-launcher-badge">0</span>
+    </button>
+
     <!-- Main file area -->
     <main class="file-area" id="fileArea">
         <div class="file-grid" id="fileGrid"></div>
@@ -343,15 +353,15 @@
     <script src="/static/vendor/marked@15.0.12.min.js"></script>
     <script src="/static/vendor/purify@3.4.15.min.js"></script>
     <script src="/static/js/dialog.js"></script>
-    <script src="/static/js/api.js"></script>
-    <script src="/static/js/settings.js?v=20260914f"></script>
+    <script src="/static/js/api.js?v=20260915e"></script>
+    <script src="/static/js/settings.js?v=20260915e"></script>
     <script src="/static/js/player.js?v=20260913b"></script>
     <script src="/static/js/fileicons.js?v=b200724b"></script>
-    <script src="/static/js/filemanager.js"></script>
-    <script src="/static/js/upload.js"></script>
+    <script src="/static/js/filemanager.js?v=20260915e"></script>
+    <script src="/static/js/upload.js?v=20260915e"></script>
     <script src="/static/js/preview.js?v=20260913a"></script>
     <script src="/static/js/share.js"></script>
-    <script src="/static/js/imagehost.js"></script>
+    <script src="/static/js/imagehost.js?v=20260915e"></script>
     <script src="/static/js/app.js"></script>
     <script src="/static/js/theme.js"></script>
 </body>

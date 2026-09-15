@@ -308,7 +308,14 @@ export async function uploadFile(req, env, db, url) {
   return json({ uploaded });
 }
 
-// ---------------- 分片上传 ----------------
+// ---------------- 分片上传 (支持断点续传) ----------------
+// 续传协议:
+//   1. 前端算文件指纹 file_key = SHA256(文件名|大小|lastModified|分片大小) — 只依赖元数据
+//   2. init 时带上 file_key/chunk_size/file_size; 服务端若已存在同一 file_key 且未完成
+//      的 session 则直接复用, 返回其 upload_id 与已上传分片清单 (received)
+//   3. 前端只补齐 received 中缺失的分片; 每片带上前端算好的 chunk_hash
+//   4. chunk 写入时同步写 blobs.hash, 并刷新 session.updated_at (定时清理依据)
+//   5. complete 分批合并 (每次 MERGE_BATCH 片), 最后一批才写元数据/删 session
 export async function uploadInit(req, env, db) {
   let body;
   try { body = await req.json(); } catch { return jerr('请求格式错误'); }
@@ -318,10 +325,40 @@ export async function uploadInit(req, env, db) {
   if (!(await dirExists(db, dir))) return jerr('目标不是目录', 400);
   const filename = sanitizeFilename(body.filename || 'upload');
   const target = splitPath(`${dir}/${filename}`).path;
+  const fileKey = String(body.file_key || '').slice(0, 128);
+  const fileSize = parseInt(body.file_size, 10) || 0;
+  const chunkSize = parseInt(body.chunk_size, 10) || 0;
+  const now = Date.now();
+
+  // 命中未完成的同源会话 → 复用 (要求目标路径/文件名/分片数/分片大小一致)
+  if (fileKey) {
+    const exist = await db.prepare(
+      'SELECT id, target, kind, total_chunks, chunk_size, merged_upto FROM upload_sessions WHERE kind = \'file\' AND file_key = ?1 AND target = ?2 AND total_chunks = ?3 AND (chunk_size = ?4 OR chunk_size = 0) ORDER BY updated_at DESC LIMIT 1',
+    ).bind(fileKey, target, total, chunkSize).first();
+    if (exist) {
+      const received = await db.prepare('SELECT idx, hash FROM blobs WHERE key = ?1 ORDER BY idx').bind('u:' + exist.id).all();
+      const rows = received.results || [];
+      // 已传分片 = 暂存键上的 + 已合并进最终键的 (complete 分批中断后的续传场景)
+      const got = new Set(rows.map((r) => r.idx));
+      const merged = exist.merged_upto || 0;
+      for (let i = 0; i < merged; i++) got.add(i);
+      // 刷新活跃时间; 分片可能少于 total (正常的中断状态), 前端据此补齐缺失片
+      await db.prepare('UPDATE upload_sessions SET updated_at = ?2 WHERE id = ?1').bind(exist.id, now).run();
+      return json({
+        upload_id: exist.id,
+        total_chunks: exist.total_chunks,
+        resumed: true,
+        received: [...got].sort((a, b) => a - b),
+        hashes: rows.filter((r) => r.hash).map((r) => ({ idx: r.idx, hash: r.hash })),
+      });
+    }
+  }
+
   const id = randomId(12);
-  await db.prepare('INSERT INTO upload_sessions (id, kind, target, filename, total_chunks, mime, created_at) VALUES (?1,\'file\',?2,?3,?4,\'\',?5)')
-    .bind(id, target, filename, total, Date.now()).run();
-  return json({ upload_id: id, total_chunks: total });
+  await db.prepare(
+    'INSERT INTO upload_sessions (id, kind, target, filename, total_chunks, mime, file_size, file_key, chunk_size, created_at, updated_at) VALUES (?1,\'file\',?2,?3,?4,\'\',?5,?6,?7,?8,?8)',
+  ).bind(id, target, filename, total, fileSize, fileKey, chunkSize, now).run();
+  return json({ upload_id: id, total_chunks: total, resumed: false, received: [], hashes: [] });
 }
 
 export async function uploadChunk(req, env, db) {
@@ -338,9 +375,82 @@ export async function uploadChunk(req, env, db) {
   const data = new Uint8Array(await dataField.arrayBuffer());
   if (data.length > 2 * 1024 * 1024) return jerr('分片过大');
 
-  await db.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) VALUES (?1, ?2, ?3)').bind('u:' + uploadId, idx, data).run();
-  const c = await db.prepare('SELECT COUNT(*) AS c FROM blobs WHERE key = ?1').bind('u:' + uploadId).first();
-  return json({ chunk_index: idx, received: c.c, total: session.total_chunks });
+  const hash = String(form.get('chunk_hash') || '').slice(0, 64);
+  await db.batch([
+    db.prepare('INSERT OR REPLACE INTO blobs (key, idx, data, hash) VALUES (?1, ?2, ?3, ?4)').bind('u:' + uploadId, idx, data, hash || null),
+    // 刷新活跃时间: 续传中的会话不会被定时清理误删
+    db.prepare('UPDATE upload_sessions SET updated_at = ?2 WHERE id = ?1').bind(uploadId, Date.now()),
+  ]);
+  // 不再每片做一次 COUNT(*) 全表统计 (片数多时是线性开销); 前端自己维护 sentChunks
+  return json({ chunk_index: idx, total: session.total_chunks });
+}
+
+// 查询会话已传分片 (页面前端持久化状态丢失时, 用它恢复进度)
+export async function uploadStatus(req, env, db, url) {
+  const uploadId = url.searchParams.get('upload_id');
+  if (!uploadId) return jerr('缺少 upload_id');
+  const session = await db.prepare('SELECT id, total_chunks, filename, target, file_size, chunk_size, updated_at, merged_upto FROM upload_sessions WHERE id = ?1').bind(uploadId).first();
+  if (!session) return json({ exists: false, received: [] });
+  const rows = await db.prepare('SELECT idx, hash FROM blobs WHERE key = ?1 ORDER BY idx').bind('u:' + uploadId).all();
+  const list = rows.results || [];
+  // 已合并进最终键的分片也算已传 (complete 分批中断后的续传场景)
+  const got = new Set(list.map((r) => r.idx));
+  const merged = session.merged_upto || 0;
+  for (let i = 0; i < merged; i++) got.add(i);
+  return json({
+    exists: true,
+    upload_id: session.id,
+    total_chunks: session.total_chunks,
+    filename: session.filename,
+    target: session.target,
+    file_size: session.file_size,
+    chunk_size: session.chunk_size,
+    updated_at: session.updated_at,
+    merged_upto: merged,
+    received: [...got].sort((a, b) => a - b),
+    hashes: list.filter((r) => r.hash).map((r) => ({ idx: r.idx, hash: r.hash })),
+  });
+}
+
+// 主动放弃一个未完成的上传: 删暂存分片 + 删会话。
+// 与定时清理的区别: 立即执行、由用户显式触发 (前端「删除」按钮)。
+// 已合并进最终键的部分 (merged_upto > 0) 是半成品文件, 一并清掉, 避免残留孤儿数据。
+export async function uploadAbort(req, env, db) {
+  let body;
+  try { body = await req.json(); } catch { return jerr('请求格式错误'); }
+  const uploadId = body.upload_id;
+  if (!uploadId) return jerr('缺少 upload_id');
+
+  const session = await db.prepare('SELECT id, kind, target, merged_upto FROM upload_sessions WHERE id = ?1').bind(uploadId).first();
+  if (!session) return json({ ok: true, deleted: 0 }); // 已不存在 → 视为成功 (幂等)
+
+  const stmts = [
+    db.prepare('DELETE FROM blobs WHERE key = ?1').bind('u:' + uploadId),
+  ];
+  // 合并过半的最终键数据也是本次上传的产物 (未写入 fs_nodes, 对用户不可见) → 清掉
+  if ((session.merged_upto || 0) > 0) {
+    const finalKey = session.kind === 'image' ? 'i:' + session.target : 'f:' + session.target;
+    stmts.push(db.prepare('DELETE FROM blobs WHERE key = ?1').bind(finalKey));
+  }
+  stmts.push(db.prepare('DELETE FROM upload_sessions WHERE id = ?1').bind(uploadId));
+  await db.batch(stmts);
+  return json({ ok: true, deleted: 1 });
+}
+
+// complete 每次合并的分片数: 单请求搬运量 ≈ MERGE_BATCH × 分片大小, 与文件总大小解耦。
+// 免费版单请求 10ms CPU, 一次性合并全部分片会随片数线性增长 → 大文件必触发 exceededCpu(1102)。
+const MERGE_BATCH = 32;
+
+// 把暂存键 [start, end) 区间的分片搬到最终键, 并删除已搬走的暂存行。
+// 不写 fs_nodes / 不删 session —— 那是"全部合并完"之后的事。
+async function mergeStagingBatch(db, stageKey, finalKey, start, end) {
+  const res = await db.batch([
+    db.prepare('INSERT OR REPLACE INTO blobs (key, idx, data, hash) SELECT ?3, idx, data, NULL FROM blobs WHERE key = ?1 AND idx >= ?2 AND idx < ?4')
+      .bind(stageKey, start, finalKey, end),
+    db.prepare('DELETE FROM blobs WHERE key = ?1 AND idx >= ?2 AND idx < ?3')
+      .bind(stageKey, start, end),
+  ]);
+  return (res && res[0] && res[0].meta && res[0].meta.changes) || 0;
 }
 
 export async function uploadComplete(req, env, db) {
@@ -351,33 +461,59 @@ export async function uploadComplete(req, env, db) {
 
   const session = await db.prepare('SELECT * FROM upload_sessions WHERE id = ?1').bind(uploadId).first();
   if (!session) return jerr('上传会话不存在', 404);
-  const old = session.kind === 'file' ? await getNode(db, session.target) : null;
 
-  const present = await db.prepare('SELECT idx FROM blobs WHERE key = ?1 ORDER BY idx').bind('u:' + uploadId).all();
-  const idxs = new Set((present.results || []).map((r) => r.idx));
-  const missing = [];
-  for (let i = 0; i < session.total_chunks; i++) if (!idxs.has(i)) missing.push(i);
-  if (missing.length) return json({ error: '缺失分片', missing }, 400);
+  const total = session.total_chunks;
+  const stageKey = 'u:' + uploadId;
+  const finalKey = session.kind === 'image' ? 'i:' + session.target : 'f:' + session.target;
 
-  // 在暂存键上统计真实字节数 (只读长度, 不拉数据)
-  const sizeRow = await db.prepare('SELECT COALESCE(SUM(LENGTH(data)),0) AS s, COUNT(*) AS c FROM blobs WHERE key = ?1').bind('u:' + uploadId).first();
+  // 批次区间: 首次从 0 开始, 后续由前端回传上一次的 next
+  let start = 0;
+  if (Array.isArray(body.batch) && body.batch.length === 2) {
+    start = Math.max(0, parseInt(body.batch[0], 10) || 0);
+  }
+
+  // 只有首次请求做一次全量缺失校验 (后续批次暂存行已被搬走, 扫不出完整信息)
+  if (start === 0) {
+    const present = await db.prepare('SELECT idx FROM blobs WHERE key = ?1').bind(stageKey).all();
+    const idxs = new Set((present.results || []).map((r) => r.idx));
+    const merged = session.merged_upto || 0;
+    for (let i = 0; i < merged; i++) idxs.add(i); // 之前批次已合并的
+    const missing = [];
+    for (let i = 0; i < total; i++) if (!idxs.has(i)) missing.push(i);
+    if (missing.length) {
+      return json({ error: '缺失分片', missing: missing.slice(0, 100), missing_count: missing.length }, 400);
+    }
+  }
+
+  const end = Math.min(start + MERGE_BATCH, total);
+  await mergeStagingBatch(db, stageKey, finalKey, start, end);
+  // 刷新活跃时间: 分批合并可能跨分钟, 防止定时任务把进行中的会话回收
+  await db.prepare('UPDATE upload_sessions SET merged_upto = ?2, updated_at = ?3 WHERE id = ?1')
+    .bind(uploadId, end, Date.now()).run();
+
+  // 还有剩余分片 → 返回下一批区间, 前端继续调用
+  if (end < total) {
+    return json({ done: false, next: [end, Math.min(end + MERGE_BATCH, total)], merged: end, total });
+  }
+
+  // 全部合并完成: 按最终键统计真实字节数 (暂存键此刻已空)
+  const sizeRow = await db.prepare('SELECT COALESCE(SUM(LENGTH(data)),0) AS s FROM blobs WHERE key = ?1').bind(finalKey).first();
   const size = sizeRow.s;
   const max = parseInt(env.MAX_UPLOAD_SIZE || '209715200', 10);
   if (size > max) {
     await db.batch([
-      db.prepare('DELETE FROM blobs WHERE key = ?1').bind('u:' + uploadId),
+      db.prepare('DELETE FROM blobs WHERE key = ?1').bind(finalKey),
+      db.prepare('DELETE FROM blobs WHERE key = ?1').bind(stageKey),
       db.prepare('DELETE FROM upload_sessions WHERE id = ?1').bind(uploadId),
     ]);
     return jerr(`文件超过最大上传限制 (${Math.floor(max / 1024 / 1024)}MB)`, 413);
   }
 
-  const stageKey = 'u:' + uploadId;
-  const finalKey = session.kind === 'image' ? 'i:' + session.target : 'f:' + session.target;
+  const old = session.kind === 'file' ? await getNode(db, session.target) : null;
   const now = new Date().toISOString();
   const stmts = [
-    db.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) SELECT ?2, idx, data FROM blobs WHERE key = ?1').bind(stageKey, finalKey),
-    db.prepare('DELETE FROM blobs WHERE key = ?1').bind(stageKey),
-    db.prepare('DELETE FROM blobs WHERE key = ?1 AND idx >= ?2').bind(finalKey, session.total_chunks),
+    // 本次分片数少于同名旧文件时, 最终键尾部会残留多余分片
+    db.prepare('DELETE FROM blobs WHERE key = ?1 AND idx >= ?2').bind(finalKey, total),
     // 覆盖上传时内容已变, 旧缩略图作废 (新缩略图由前端生成后回写)
     db.prepare('DELETE FROM blobs WHERE key = ?1').bind('t:' + session.target),
   ];
@@ -387,19 +523,22 @@ export async function uploadComplete(req, env, db) {
   } else {
     const sp = splitPath(session.target);
     stmts.push(db.prepare('INSERT OR REPLACE INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7)')
-      .bind(sp.path, sp.parent, sp.name, size, mimeFromName(session.filename), now, session.total_chunks));
+      .bind(sp.path, sp.parent, sp.name, size, mimeFromName(session.filename), now, total));
   }
   stmts.push(db.prepare('DELETE FROM upload_sessions WHERE id = ?1').bind(uploadId));
   await db.batch(stmts);
 
   if (session.kind === 'image') {
     await invalidateIhCache(session.target);
-    return buildUploadResponse(req, session.target, session.filename, session.mime || mimeFromName(session.filename));
+    const r = buildUploadResponse(req, session.target, session.filename, session.mime || mimeFromName(session.filename));
+    // 保持与文件上传一致的 done 语义, 同时保留图床原有的嵌入代码字段
+    const payload = await r.json();
+    return json({ ...payload, done: true });
   }
   const sp = splitPath(session.target);
   if (old && !old.is_dir) await invalidateFileCache(session.target, old.size);
   await invalidateDir(db, sp.parent);
-  return json({ filename: session.filename, path: session.target });
+  return json({ done: true, filename: session.filename, path: session.target });
 }
 
 // ---------------- 公共文件响应 (Range + 边缘缓存), 供 vfs/图床/分享复用 ----------------

@@ -21,10 +21,15 @@ export default {
     }
   },
 
-  // 每日清理: 24h 前的孤儿上传暂存分片与会话
+  // 每日清理: 长期未活动的孤儿上传暂存分片与会话
+  // 判据用 updated_at (而非 created_at): 断点续传的会话可能创建很久但仍在续传,
+  // 只要有分片写入就会刷新 updated_at, 不会被误删。
+  // 旧数据 updated_at = 0 → 回退用 created_at 判断。
   async scheduled(event, env, ctx) {
     const cutoff = Date.now() - 24 * 3600 * 1000;
-    const stale = await env.DB.prepare('SELECT id FROM upload_sessions WHERE created_at < ?1').bind(cutoff).all();
+    const stale = await env.DB.prepare(
+      'SELECT id FROM upload_sessions WHERE (updated_at > 0 AND updated_at < ?1) OR (updated_at = 0 AND created_at < ?1)',
+    ).bind(cutoff).all();
     for (const row of stale.results || []) {
       await env.DB.batch([
         env.DB.prepare('DELETE FROM blobs WHERE key = ?1').bind('u:' + row.id),
@@ -106,8 +111,10 @@ async function route(request, env, ctx) {
   if (path === '/api/files/batch-delete' && method === 'POST') return vfs.batchDelete(request, env, db);
   if (path === '/api/files/batch-download' && method === 'POST') return vfs.batchDownload(request, env, db);
   if (path === '/api/files/upload/init' && method === 'POST') return vfs.uploadInit(request, env, db);
+  if (path === '/api/files/upload/status' && method === 'GET') return vfs.uploadStatus(request, env, db, url);
   if (path === '/api/files/upload/chunk' && method === 'POST') return vfs.uploadChunk(request, env, db);
   if (path === '/api/files/upload/complete' && method === 'POST') return vfs.uploadComplete(request, env, db);
+  if (path === '/api/files/upload/abort' && method === 'POST') return vfs.uploadAbort(request, env, db);
 
   // 预览 / 搜索 / 缩略图
   if (path === '/api/preview' && method === 'GET') return vfs.previewFile(request, env, db, url);
@@ -129,6 +136,7 @@ async function route(request, env, ctx) {
   // 图床
   if (path === '/api/image-host/upload' && method === 'POST') return ih.upload(request, env, db);
   if (path === '/api/image-host/upload/init' && method === 'POST') return ih.uploadInit(request, env, db);
+  if (path === '/api/image-host/upload/status' && method === 'GET') return vfs.uploadStatus(request, env, db, url);
   if (path === '/api/image-host/upload/chunk' && method === 'POST') return vfs.uploadChunk(request, env, db); // 与文件分片共用
   if (path === '/api/image-host/upload/complete' && method === 'POST') return vfs.uploadComplete(request, env, db);
   if (path === '/api/image-host/import' && method === 'POST') return ih.importFromFiles(request, env, db);

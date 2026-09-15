@@ -215,6 +215,16 @@ export function randomId(len) {
   return s;
 }
 
+// ---------------- SHA-256 (hex) ----------------
+// 用于分片 hash 校验; 仅在前端未提供 hash 时由服务端兜底计算
+export async function sha256Hex(buf) {
+  const bits = await crypto.subtle.digest('SHA-256', buf);
+  const u = new Uint8Array(bits);
+  let s = '';
+  for (let i = 0; i < u.length; i++) s += u[i].toString(16).padStart(2, '0');
+  return s;
+}
+
 // ---------------- Range 解析 (对应原版 media.rs) ----------------
 // 返回: null=整文件  {start,end}=区间  'unsatisfiable'=416
 export function parseRange(headerValue, size) {

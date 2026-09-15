@@ -163,33 +163,55 @@ const API = {
         document.body.removeChild(form);
     },
 
-    // Chunked upload
-    async uploadInit(path, filename, totalChunks) {
-        const res = await this.request('POST', '/api/files/upload/init', { path, filename, total_chunks: totalChunks });
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({ error: res.statusText }));
-            throw new Error(err.error || 'Upload init failed');
-        }
+    // 上传类请求的统一错误构造: 边缘 1102/502/524 等返回的是 HTML 错误页而非项目 JSON,
+    // res.json() 会失败。此时必须保留 HTTP 状态码, 否则前端只看到一句
+    // "Chunk upload failed", 无法判断该重试还是该报错。
+    async _uploadError(res, fallback) {
+        let msg = '';
+        try {
+            const j = await res.json();
+            msg = (j && j.error) || '';
+        } catch { /* 非 JSON: 边缘错误页 */ }
+        const e = new Error(msg || `${fallback} (HTTP ${res.status})`);
+        e.status = res.status;
+        return e;
+    },
+    // Chunked upload (支持断点续传: 传 file_key/chunk_size, 服务端命中则复用已传分片)
+    async uploadInit(path, filename, totalChunks, opts = {}) {
+        const body = { path, filename, total_chunks: totalChunks };
+        if (opts.fileKey) body.file_key = opts.fileKey;
+        if (opts.fileSize) body.file_size = opts.fileSize;
+        if (opts.chunkSize) body.chunk_size = opts.chunkSize;
+        const res = await this.request('POST', '/api/files/upload/init', body);
+        if (!res.ok) throw await this._uploadError(res, '初始化上传失败');
         return res.json();
     },
-    async uploadChunk(uploadId, chunkIndex, chunkData) {
+    // 查询会话已传分片 (页面刷新/换设备后恢复进度)
+    uploadStatus(uploadId) {
+        return this.json('GET', `/api/files/upload/status?upload_id=${encodeURIComponent(uploadId)}`);
+    },
+    async uploadChunk(uploadId, chunkIndex, chunkData, chunkHash) {
         const fd = new FormData();
         fd.append('upload_id', uploadId);
         fd.append('chunk_index', String(chunkIndex));
+        if (chunkHash) fd.append('chunk_hash', chunkHash);
         fd.append('data', new Blob([chunkData]));
         const res = await this.request('POST', '/api/files/upload/chunk', fd);
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({ error: res.statusText }));
-            throw new Error(err.error || 'Chunk upload failed');
-        }
+        if (!res.ok) throw await this._uploadError(res, '分片上传失败');
         return res.json();
     },
-    async uploadComplete(uploadId) {
-        const res = await this.request('POST', '/api/files/upload/complete', { upload_id: uploadId });
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({ error: res.statusText }));
-            throw new Error(err.error || 'Upload complete failed');
-        }
+    // 分批合并: 首次不传 batch, 之后回传上一次的 next, 直到 done:true
+    async uploadComplete(uploadId, batch) {
+        const body = { upload_id: uploadId };
+        if (batch) body.batch = batch;
+        const res = await this.request('POST', '/api/files/upload/complete', body);
+        if (!res.ok) throw await this._uploadError(res, '合并分片失败');
+        return res.json();
+    },
+    // 放弃一个未完成的上传 (清服务端暂存分片 + 会话); 幂等
+    async uploadAbort(uploadId) {
+        const res = await this.request('POST', '/api/files/upload/abort', { upload_id: uploadId });
+        if (!res.ok) throw await this._uploadError(res, '取消上传失败');
         return res.json();
     },
 
@@ -230,23 +252,33 @@ const API = {
 
     // Image Host
     importToImageHost(path) { return this.json('POST', '/api/image-host/import', { path }); },
-    async ihUploadInit(filename, totalChunks) {
-        const res = await this.request('POST', '/api/image-host/upload/init', { filename, total_chunks: totalChunks });
-        if (!res.ok) { const err = await res.json().catch(() => ({ error: res.statusText })); throw new Error(err.error || 'Upload init failed'); }
+    async ihUploadInit(filename, totalChunks, opts = {}) {
+        const body = { filename, total_chunks: totalChunks };
+        if (opts.fileSize) body.file_size = opts.fileSize;
+        if (opts.chunkSize) body.chunk_size = opts.chunkSize;
+        const res = await this.request('POST', '/api/image-host/upload/init', body);
+        if (!res.ok) throw await this._uploadError(res, '初始化上传失败');
         return res.json();
     },
-    async ihUploadChunk(uploadId, chunkIndex, chunkData) {
+    ihUploadStatus(uploadId) {
+        return this.json('GET', `/api/image-host/upload/status?upload_id=${encodeURIComponent(uploadId)}`);
+    },
+    async ihUploadChunk(uploadId, chunkIndex, chunkData, chunkHash) {
         const fd = new FormData();
         fd.append('upload_id', uploadId);
         fd.append('chunk_index', String(chunkIndex));
+        if (chunkHash) fd.append('chunk_hash', chunkHash);
         fd.append('data', new Blob([chunkData]));
         const res = await this.request('POST', '/api/image-host/upload/chunk', fd);
-        if (!res.ok) { const err = await res.json().catch(() => ({ error: res.statusText })); throw new Error(err.error || 'Chunk upload failed'); }
+        if (!res.ok) throw await this._uploadError(res, '分片上传失败');
         return res.json();
     },
-    async ihUploadComplete(uploadId) {
-        const res = await this.request('POST', '/api/image-host/upload/complete', { upload_id: uploadId });
-        if (!res.ok) { const err = await res.json().catch(() => ({ error: res.statusText })); throw new Error(err.error || 'Upload complete failed'); }
+    // 分批合并 (同 uploadComplete)
+    async ihUploadComplete(uploadId, batch) {
+        const body = { upload_id: uploadId };
+        if (batch) body.batch = batch;
+        const res = await this.request('POST', '/api/image-host/upload/complete', body);
+        if (!res.ok) throw await this._uploadError(res, '合并分片失败');
         return res.json();
     },
 

@@ -210,10 +210,19 @@ const ImageHost = (function() {
             for (const file of fileList) {
                 const id = Date.now() + Math.random();
                 const totalChunks = Math.max(1, Math.ceil(file.size / IH_CHUNK_SIZE));
-                const task = { id, name: file.name, file, progress: 0, paused: false, aborted: false, uploadId: null, totalChunks, sentChunks: 0, received: null, inflight: null, result: null, chunkSize: IH_CHUNK_SIZE, timeoutRetries: 0 };
+                const task = { id, name: file.name, file, progress: 0, paused: false, aborted: false, uploadId: null, totalChunks, sentChunks: 0, received: null, inflight: null, result: null, chunkSize: IH_CHUNK_SIZE, concurrent: IH_CONCURRENT, timeoutRetries: 0 };
                 uploadTasks.push(task);
                 this.renderUploadItem(listEl, task);
-                this.doChunkedUpload(task);
+                // 补一层 catch 保险: 异常必须可见, 不能静默消失
+                this.doChunkedUpload(task).catch((e) => {
+                    const el = document.getElementById('ih-upload-' + task.id);
+                    if (!el) return;
+                    const status = el.querySelector('.ih-upload-status');
+                    if (status) {
+                        status.textContent = '✗ ' + ((e && e.message) || '');
+                        status.style.color = 'var(--color-error)';
+                    }
+                });
             }
         },
 
@@ -290,46 +299,25 @@ const ImageHost = (function() {
         },
 
         // Check if error is timeout-related
+        // 边缘 1102/502-504 等返回 HTML 错误页时拿不到 error 文案, 需靠 api.js 挂的 status
         isTimeoutError: function(e) {
             const msg = (e.message || '').toLowerCase();
-            return msg.includes('524') || msg.includes('timeout') || msg.includes('network') || msg.includes('failed to fetch');
+            const st = e && e.status;
+            if (st === 502 || st === 503 || st === 504 || st === 521 || st === 522
+                || st === 523 || st === 524 || st === 525 || st === 526 || st === 530) return true;
+            if (st === 500 && /1102|exceededCpu|exceeded cpu/.test(msg)) return true;
+            return msg.includes('1102') || msg.includes('exceededcpu')
+                || msg.includes('524') || msg.includes('timeout') || msg.includes('network') || msg.includes('failed to fetch')
+                || msg.includes('502') || msg.includes('503') || msg.includes('504');
         },
 
-        // Reduce chunk size and re-map received chunks
-        shrinkChunks: function(task) {
-            const oldSize = task.chunkSize;
-            const newSize = Math.max(oldSize / 2, 32 * 1024); // 最小 32KB
-            if (newSize === oldSize) return false; // 无法再缩小
-
-            const newTotal = Math.max(1, Math.ceil(task.file.size / newSize));
-
-            // Re-map old received chunks to new indices
-            const oldReceived = task.received;
-            const newReceived = new Array(newTotal).fill(false);
-            if (oldReceived) {
-                for (let oldIdx = 0; oldIdx < oldReceived.length; oldIdx++) {
-                    if (!oldReceived[oldIdx]) continue;
-                    const byteStart = oldIdx * oldSize;
-                    const byteEnd = Math.min(byteStart + oldSize, task.file.size);
-                    const newStart = Math.floor(byteStart / newSize);
-                    const newEnd = Math.min(Math.ceil(byteEnd / newSize), newTotal);
-                    for (let i = newStart; i < newEnd; i++) newReceived[i] = true;
-                }
-            }
-
-            task.chunkSize = newSize;
-            task.totalChunks = newTotal;
-            task.received = newReceived;
-            task.inflight = new Set();
-            task.sentChunks = newReceived.filter(Boolean).length;
-            task.progress = Math.round((task.sentChunks / newTotal) * 100);
-            task.uploadId = null; // 需要重新 init
-
-            // Update UI detail
-            const el = document.getElementById('ih-upload-' + task.id);
-            const uploaded = Math.min(newReceived.filter(Boolean).length * newSize, task.file.size);
-        if (el) el.querySelector('.ih-upload-detail').textContent = `${newReceived.filter(Boolean).length}/${newTotal} 分片 (${formatSize(uploaded)}/${formatSize(task.file.size)}, ${Math.round(newSize/1024)}KB/片)`;
-
+        // 遇到 1102/524 的降级手段: 降并发, 不动分片大小。
+        // 缩分片会改 fileKey (含 chunkSize) → 换服务端会话 → 已传分片全部作废, 代价过高;
+        // 1102 的决定量是「分片大小 × 并发数」的乘积, 只降并发即可同样降压。
+        reduceConcurrency: function(task) {
+            const cur = task.concurrent || 1;
+            if (cur <= 1) return false;
+            task.concurrent = Math.max(1, Math.floor(cur / 2));
             return true;
         },
 
@@ -344,8 +332,18 @@ const ImageHost = (function() {
                 if (!task.uploadId) {
                     const uploaded = Math.min(task.sentChunks * task.chunkSize, task.file.size);
                     status.textContent = `${task.sentChunks}/${task.totalChunks} 分片 (${formatSize(uploaded)}/${formatSize(task.file.size)})`;
-                    const initRes = await API.ihUploadInit(task.name, task.totalChunks);
+                    const initRes = await API.ihUploadInit(task.name, task.totalChunks, {
+                        fileSize: task.file.size, chunkSize: task.chunkSize,
+                    });
                     task.uploadId = initRes.upload_id;
+                    // 服务端已有分片 (同页面重试场景) → 跳过已传
+                    if (!task.received) task.received = new Array(task.totalChunks).fill(false);
+                    if (Array.isArray(initRes.received) && initRes.received.length) {
+                        for (const i of initRes.received) if (i >= 0 && i < task.totalChunks) task.received[i] = true;
+                        task.sentChunks = task.received.filter(Boolean).length;
+                        task.progress = Math.round((task.sentChunks / task.totalChunks) * 100);
+                        this.updateUploadUI(task);
+                    }
                 }
 
                 if (!task.received) task.received = new Array(task.totalChunks).fill(false);
@@ -355,7 +353,9 @@ const ImageHost = (function() {
                     const start = idx * task.chunkSize;
                     const end = Math.min(start + task.chunkSize, task.file.size);
                     const chunk = task.file.slice(start, end);
-                    await API.ihUploadChunk(task.uploadId, idx, chunk);
+                    // 分片 hash 可选: 无 crypto.subtle 时 hashChunk 返回 null, 跳过校验
+                    const h = await Upload.hashChunk(chunk);
+                    await API.ihUploadChunk(task.uploadId, idx, chunk, h);
                     task.received[idx] = true;
                     task.sentChunks = task.received.filter(Boolean).length;
                     task.progress = Math.round((task.sentChunks / task.totalChunks) * 100);
@@ -366,7 +366,9 @@ const ImageHost = (function() {
                     if (task.paused || task.aborted) return;
 
                     const batch = [];
-                    for (let i = 0; i < task.totalChunks && batch.length < IH_CONCURRENT; i++) {
+                    // 并发取 task.concurrent (可运行时降级), 缺省回落常量
+                    const conc = task.concurrent || IH_CONCURRENT;
+                    for (let i = 0; i < task.totalChunks && batch.length < conc; i++) {
                         if (!task.received[i] && !task.inflight.has(i)) {
                             task.inflight.add(i);
                             batch.push(i);
@@ -390,23 +392,38 @@ const ImageHost = (function() {
 
                     if (task.paused || task.aborted) return;
 
+                    // 瞬态错误降级: 第 1 次原样重试; 第 2 次起降并发 (绝不缩分片, 见 reduceConcurrency 注释)
                     if (timeoutHit && task.timeoutRetries < 5) {
                         task.timeoutRetries++;
-                        const oldSize = task.chunkSize;
-                        if (this.shrinkChunks(task)) {
-                            status.textContent = `超时，缩小分片 ${Math.round(oldSize/1024)}→${Math.round(task.chunkSize/1024)}KB (${task.timeoutRetries}/5)`;
+                        if (task.timeoutRetries <= 1) {
+                            status.textContent = `网络抖动，重试 (${task.timeoutRetries}/1)`;
                             this.updateUploadUI(task);
-                            throw { _retry: true };
+                            continue;
                         }
+                        if (this.reduceConcurrency(task)) {
+                            status.textContent = `边缘超限，并发降至 ${task.concurrent}`;
+                            this.updateUploadUI(task);
+                            continue;
+                        }
+                        status.textContent = `重试中 (${task.timeoutRetries}/5)`;
+                        this.updateUploadUI(task);
+                        continue;
                     }
                 }
 
                 if (task.paused || task.aborted) return;
 
-                // Step 3: Complete
+                // Step 3: Complete (服务端分批合并, 单请求开销恒定)
                 status.textContent = '合并中...';
                 btn.style.display = 'none';
-                task.result = await API.ihUploadComplete(task.uploadId);
+                let batch = null;
+                for (;;) {
+                    if (task.paused || task.aborted) return;
+                    const r = await API.ihUploadComplete(task.uploadId, batch);
+                    if (r.done) { task.result = r; break; }
+                    batch = r.next;
+                    status.textContent = `合并中... ${r.merged}/${r.total}`;
+                }
 
                 status.textContent = '✓';
                 status.style.color = 'var(--color-success)';
@@ -420,12 +437,6 @@ const ImageHost = (function() {
                     this.showEmbedDialog(task.result);
                 }
             } catch (e) {
-                // Auto-retry on timeout with smaller chunks
-                if (e && e._retry) {
-                    status.textContent = `重试中 (${Math.round(task.chunkSize/1024)}KB)...`;
-                    btn.style.display = 'none';
-                    return this.doChunkedUpload(task);
-                }
                 status.textContent = '✗ ' + (e.message || '');
                 status.style.color = 'var(--color-error)';
                 btn.textContent = '重试';
@@ -437,7 +448,7 @@ const ImageHost = (function() {
                     status.textContent = task.progress + '%';
                     btn.textContent = '暂停';
                     btn.onclick = () => ImageHost.togglePause(task.id);
-                    this.doChunkedUpload(task);
+                    this.doChunkedUpload(task).catch(() => {});
                 };
             }
         },

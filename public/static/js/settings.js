@@ -28,7 +28,8 @@ const AppSettings = {
         for (const r of (m.chunk_rules || [])) {
             if (size >= r.min && size <= r.max) return r;
         }
-        return m.chunk_default;
+        // 服务端设置若缺 chunk_default (老库/异常数据) 时兜底, 避免调用方读到 undefined.chunk_size
+        return m.chunk_default || this.defaults.chunk_default;
     },
     uploadLimit() { return this.merged().upload_limit[this.deviceKey()]; },
     previewLimit(kind) { return this.merged()[kind][this.deviceKey()]; }, // kind: preview_text / preview_markdown / preview_html

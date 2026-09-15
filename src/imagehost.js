@@ -56,11 +56,16 @@ export async function uploadInit(req, env, db) {
   const mime = mimeFromName(filename);
   if (!ALLOWED(mime)) return jerr('不支持的文件类型，仅支持图片、视频、音频和 PDF');
   const ext = fileExt(filename);
+  // 图床文件名随机生成, 同源文件重复上传会各自成一份 (不做跨会话续传匹配):
+  // 图床场景通常是小文件, 断点续传价值有限; 但仍支持"同一页面内重试不重传"。
   const target = generateFilename(ext); // 与原版不同: 合并时才定名, 这里提前定名以直写暂存
   const id = randomId(12);
-  await db.prepare('INSERT INTO upload_sessions (id, kind, target, filename, total_chunks, mime, created_at) VALUES (?1,\'image\',?2,?3,?4,?5,?6)')
-    .bind(id, target, filename, total, mime, Date.now()).run();
-  return json({ upload_id: id, total_chunks: total });
+  const now = Date.now();
+  const fileSize = parseInt(body.file_size, 10) || 0;
+  const chunkSize = parseInt(body.chunk_size, 10) || 0;
+  await db.prepare('INSERT INTO upload_sessions (id, kind, target, filename, total_chunks, mime, file_size, file_key, chunk_size, created_at, updated_at) VALUES (?1,\'image\',?2,?3,?4,?5,?6,\'\',?7,?8,?8)')
+    .bind(id, target, filename, total, mime, fileSize, chunkSize, now).run();
+  return json({ upload_id: id, total_chunks: total, resumed: false, received: [], hashes: [] });
 }
 
 // 分片上传 chunk/complete 与文件管理器共用同一实现 (vfs.js), 由路由按 kind 分发

@@ -319,8 +319,18 @@ img.thumb-icon.thumb-loading{animation:shimmer 1.2s linear infinite;background:l
 .upload-item-status{font-size:11px;color:var(--text-tertiary);min-width:40px;text-align:right}
 .btn-xs{padding:2px 8px;font-size:11px;border-radius:4px;border:1px solid var(--border);background:var(--bg-raised);color:var(--text-secondary);cursor:pointer}
 .btn-xs:hover{background:var(--bg-overlay)}
+.upload-del-btn{flex:0 0 auto}
+.upload-del-btn:hover{background:var(--color-error);border-color:var(--color-error);color:#fff}
 .auto-close-bar{height:3px;background:var(--bg-raised);overflow:hidden}
 .auto-close-bar-fill{height:100%;background:var(--color-success);width:100%}
+
+/* 未完成上传的右下角悬浮入口 (仅存在未完成任务时显示) */
+.upload-launcher{position:fixed;bottom:16px;right:16px;z-index:210;display:flex;align-items:center;justify-content:center;width:52px;height:52px;padding:0;border:none;border-radius:50%;cursor:pointer;background:var(--accent);color:#fff;box-shadow:var(--shadow-lg);transition:transform .15s ease,filter .15s ease}
+.upload-launcher:hover{transform:scale(1.06);filter:brightness(1.08)}
+.upload-launcher:active{transform:scale(.96)}
+.upload-launcher-badge{position:absolute;top:-4px;right:-4px;min-width:20px;height:20px;padding:0 5px;border-radius:10px;background:var(--color-error);color:#fff;font-size:11px;font-weight:700;line-height:20px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.35)}
+/* 入口按钮可见时, 上传面板上移让位, 避免遮挡 */
+body.has-upload-launcher .upload-progress{bottom:80px}
 
 /* === MODALS === */
 .modal-overlay{position:fixed;inset:0;background:rgba(15,17,23,0.9);z-index:600;display:flex;align-items:center;justify-content:center}

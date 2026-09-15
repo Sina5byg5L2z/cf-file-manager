@@ -18,10 +18,12 @@ CREATE INDEX IF NOT EXISTS idx_fs_parent ON fs_nodes(parent);
 CREATE INDEX IF NOT EXISTS idx_fs_name   ON fs_nodes(name);
 
 -- 文件内容分片 (1MB/片)。key: 'f:<path>' 文件管理器 / 'i:<filename>' 图床
+-- hash: 分片内容 SHA-256 十六进制 (前端计算); 用于断点续传时校验同名分片内容一致
 CREATE TABLE IF NOT EXISTS blobs (
   key TEXT NOT NULL,
   idx INTEGER NOT NULL,
   data BLOB NOT NULL,
+  hash TEXT,
   PRIMARY KEY (key, idx)
 );
 
@@ -46,6 +48,10 @@ CREATE TABLE IF NOT EXISTS share_links (
 );
 
 -- 分片上传会话（分片先写入 blobs 的 'u:<id>' 暂存键，complete 时合并）
+-- file_key: 文件指纹 (前端计算: 文件名+大小+最后修改时间+首尾分片hash 的 SHA-256);
+--           用于"重新选同一文件"时跨会话匹配到未完成的 session, 复用已传分片
+-- chunk_size: 该 session 使用的分片大小 (字节); 续传要求前后分片大小一致
+-- updated_at: 最近一次有分片写入的时间; 定时清理据此判断 (活跃续传不会被误删)
 CREATE TABLE IF NOT EXISTS upload_sessions (
   id           TEXT PRIMARY KEY,
   kind         TEXT NOT NULL,           -- 'file' | 'image'
@@ -53,8 +59,15 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
   filename     TEXT NOT NULL,           -- 原始文件名
   total_chunks INTEGER NOT NULL,
   mime         TEXT NOT NULL DEFAULT '',
-  created_at   INTEGER NOT NULL
+  file_size    INTEGER NOT NULL DEFAULT 0,
+  file_key     TEXT NOT NULL DEFAULT '',
+  chunk_size   INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL DEFAULT 0,
+  b2_key       TEXT NOT NULL DEFAULT '',   -- 预留 (B2 方案未落地)
+  merged_upto  INTEGER NOT NULL DEFAULT 0  -- complete 分批合并: 已合并进最终键的分片数
 );
+CREATE INDEX IF NOT EXISTS idx_us_file_key ON upload_sessions(file_key);
 
 -- 应用参数设置（单行, key='ui', value=JSON; 由页面"参数设置"维护: 分片大小/
 -- 并发数/移动端与电脑端的上传与预览大小上限。缺省值在 src/settings.js 中兜底）

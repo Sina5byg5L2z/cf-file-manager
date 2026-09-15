@@ -545,7 +545,9 @@ const FM = {
             overlay.style.display = 'none';
             dragCounter = 0;
             if (e.dataTransfer.files.length > 0) {
-                Upload.uploadFiles(e.dataTransfer.files, this.currentPath);
+                // uploadFiles 是 async: 必须接住拒绝, 否则异常只落进控制台, 界面无反馈
+                const r = Upload.uploadFiles(e.dataTransfer.files, this.currentPath);
+                if (r && typeof r.catch === 'function') r.catch(() => {});
             }
         });
     },
