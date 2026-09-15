@@ -132,6 +132,7 @@
             '    <div class="mp-info-actions">',
             '      <button class="mp-btn" data-act="reparse">从文件名重新解析</button>',
             '      <button class="mp-btn" data-act="refetch">重新联网获取</button>',
+            '      <button class="mp-btn" data-act="cancelinfo">取消</button>',
             '      <button class="mp-btn mp-primary" data-act="saveinfo">保存</button>',
             '    </div>',
             '  </div>',
@@ -172,6 +173,14 @@
     }
 
     function bind() {
+        // 队列面板: 点击面板外任意位置关闭(队列按钮自身走 toggle 分支, 不在此处理)
+        document.addEventListener('click', function (e) {
+            if (!el.queue || el.queue.style.display === 'none') return;
+            if (el.queue.contains(e.target)) return;
+            var qbtn = e.target.closest ? e.target.closest('[data-act="queue"]') : null;
+            if (qbtn) return;
+            el.queue.style.display = 'none';
+        });
         document.addEventListener('click', function (e) {
             var t = e.target.closest ? e.target.closest('[data-act]') : null;
             if (!t) return;
@@ -185,6 +194,7 @@
             else if (act === 'expand') openFull();
             else if (act === 'collapse') closeFull();
             else if (act === 'info') openInfo();
+            else if (act === 'cancelinfo') togglePanel('info');
             else if (act === 'saveinfo') saveInfo();
             else if (act === 'reparse') reparseFromName();
             else if (act === 'refetch') refetchLyrics();
