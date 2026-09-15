@@ -141,7 +141,7 @@
     <script src="/static/js/hljs-async.js?v=20260912d"></script>
     <script src="/static/vendor/marked@15.0.12.min.js"></script>
     <script src="/static/vendor/purify@3.4.15.min.js"></script>
-    <script src="/static/js/settings.js?v=20260914a"></script>
+    <script src="/static/js/settings.js?v=20260915i"></script>
     <script>
     (function() {
         const shareId = window.location.pathname.split('/s/')[1]?.split('?')[0]?.split('/')[0] || '';
@@ -726,34 +726,23 @@
         const _downloadLocks = {};
         const _entrySizes = {}; // 记录当前列表中各文件大小, 大文件走分片续传下载
 
-        // 分片续传下载 (免费版服务端 Range 窗口封顶 512KB, 逐段拼装)
-        async function downloadChunked(name, url, size) {
-            const parts = [];
-            let start = 0;
-            while (start < size) {
-                let buf = null, end = -1;
-                // 长链路串行请求会被边缘掐断, 每段自动重试
-                for (let attempt = 0; ; attempt++) {
-                    try {
-                        const res = await fetch(url, { headers: { Range: 'bytes=' + start + '-' } });
-                        if (res.status !== 206 && !res.ok) throw new Error('HTTP ' + res.status);
-                        buf = await res.arrayBuffer();
-                        if (!buf.byteLength) throw new Error('空响应');
-                        const cr = res.headers.get('Content-Range'); // bytes s-e/total
-                        if (!cr) throw new Error('缺少 Content-Range');
-                        const seg = cr.split(/[-/ ]/); // [bytes, start, end, total]
-                        if (parseInt(seg[1], 10) !== start) throw new Error('范围错位');
-                        end = parseInt(seg[2], 10);
-                        break;
-                    } catch (e) {
-                        if (attempt >= 4) throw new Error('下载中断 (bytes=' + start + ', ' + e.message + ')');
-                        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
-                    }
-                }
-                parts.push(buf);
-                start = end + 1;
-            }
-            const blob = new Blob(parts);
+        // 分片下载。完整性一律以"文件总大小"为准, 三道校验:
+        //   ① 响应声明的总长 (Content-Range 的 /total) 必须等于已知总长;
+        //   ② 每段实际字节数必须等于该段承诺的长度;
+        //   ③ 拼装后 blob.size 必须等于已知总长 —— 不等就报错弹窗, 绝不当成功交出残缺文件。
+        // 窗口取「参数设置 → 单次下载窗口」(服务端按同一值封顶 Range 响应);
+        // 单段失败折半重试 (最小 1MiB) —— 平台在 CPU 上限处会静默截断, 只有小窗口能救回来。
+        const DL_MIN_W = 1024 * 1024, DL_CONC = 3, DL_SMALL = 4 * 1024 * 1024;
+
+        function dlWindow() {
+            try {
+                const v = AppSettings.downloadRange();
+                if (v >= DL_MIN_W) return v;
+            } catch (e) { /* settings 未加载时用默认 */ }
+            return 8 * 1024 * 1024;
+        }
+
+        function saveBlob(blob, name) {
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
             a.download = name;
@@ -761,7 +750,87 @@
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+            setTimeout(function() { URL.revokeObjectURL(a.href); }, 30000);
+        }
+
+        function directDownload(url, name, useName) {
+            const a = document.createElement('a');
+            a.href = url;
+            if (useName) a.download = name;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        async function downloadChunked(name, url, size) {
+            const MAX_W = dlWindow();
+            const chunks = [];
+            for (let s = 0; s < size; s += MAX_W) chunks.push({ start: s, end: Math.min(s + MAX_W, size) });
+            const parts = new Array(chunks.length);
+            let got = 0, next = 0;
+            const btn = document.getElementById('btnDownload');
+
+            const worker = async function() {
+                for (;;) {
+                    const i = next++;
+                    if (i >= chunks.length) return;
+                    const c = chunks[i];
+                    const piece = [];
+                    let p = c.start, len = MAX_W;
+                    while (p < c.end) {
+                        for (let attempt = 0; ; attempt++) {
+                            try {
+                                const want = Math.min(p + len, c.end);
+                                const res = await fetch(url, { headers: { Range: 'bytes=' + p + '-' + (want - 1) } });
+                                if (res.status !== 206 && !res.ok) throw new Error('HTTP ' + res.status);
+                                const buf = new Uint8Array(await res.arrayBuffer());
+                                const cr = res.headers.get('Content-Range'); // bytes s-e/total
+                                if (!cr) throw new Error('缺少 Content-Range');
+                                const seg = cr.split(/[-/ ]/); // [bytes, start, end, total]
+                                const declared = parseInt(seg[3], 10);
+                                if (Number.isFinite(declared) && declared !== size) {
+                                    throw new Error('文件大小与预期不符（服务端 ' + declared + ' / 预期 ' + size + ' 字节）');
+                                }
+                                if (parseInt(seg[1], 10) !== p) throw new Error('范围错位');
+                                const end = Math.min(parseInt(seg[2], 10), c.end - 1);
+                                if (buf.length !== end - p + 1) throw new Error('响应被截断（' + buf.length + '/' + (end - p + 1) + ' 字节）');
+                                piece.push(buf);
+                                got += buf.length;
+                                if (btn && btn.disabled && got < size) {
+                                    btn.textContent = '下载中 ' + Math.floor(got / size * 100) + '%';
+                                }
+                                p = end + 1; // 服务端窗口更小时也照此续拉
+                                break;
+                            } catch (e) {
+                                if (attempt >= 4) throw new Error('从第 ' + p + ' 字节起下载失败：' + e.message);
+                                len = Math.max(DL_MIN_W, len >> 1); // 折半窗口, 降低单次 CPU
+                                await new Promise(function(r) { setTimeout(r, 400 * (attempt + 1)); });
+                            }
+                        }
+                    }
+                    parts[i] = piece;
+                }
+            };
+            await Promise.all([worker(), worker(), worker()]);
+
+            const blob = new Blob(parts.flat());
+            if (blob.size !== size) {
+                throw new Error('下载不完整：实收 ' + blob.size + ' / 应有 ' + size + ' 字节，已放弃保存');
+            }
+            return blob;
+        }
+
+        // 用 1 字节 Range 探测总大小 (Content-Range: bytes 0-0/<total>)
+        async function probeSize(url) {
+            const res = await fetch(url, { headers: { Range: 'bytes=0-0' } });
+            const cr = res.headers.get('Content-Range');
+            if (cr && cr.indexOf('/') !== -1) {
+                const t = parseInt(cr.split('/')[1], 10);
+                if (Number.isFinite(t)) return t;
+            }
+            const len = res.headers.get('Content-Length');
+            return len ? parseInt(len, 10) : NaN;
         }
 
         function downloadFile(name) {
@@ -773,20 +842,6 @@
             if (currentSubPath) url += '&sub_path=' + encodeURIComponent(currentSubPath);
             if (currentPassword) url += '&password=' + encodeURIComponent(currentPassword);
 
-            const size = _entrySizes[name];
-            if (size && size > 4 * 1024 * 1024) {
-                downloadChunked(name, url, size).catch(function(e) { Dialog.alert(e.message || '下载失败'); });
-                return;
-            }
-
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = name;
-            a.style.display = 'none';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-
             // Disable download buttons for this file
             app.querySelectorAll('[data-download="' + CSS.escape(name) + '"]').forEach(btn => {
                 btn.disabled = true;
@@ -795,15 +850,29 @@
             const mainBtn = document.getElementById('btnDownload');
             if (mainBtn) { mainBtn.disabled = true; mainBtn.textContent = '下载中...'; }
 
-            // Re-enable after 2 seconds
-            setTimeout(() => {
+            function release() {
                 delete _downloadLocks[name];
                 app.querySelectorAll('[data-download="' + CSS.escape(name) + '"]').forEach(btn => {
                     btn.disabled = false;
                     btn.textContent = '下载';
                 });
                 if (mainBtn) { mainBtn.disabled = false; mainBtn.textContent = '\u2B07 下载'; }
-            }, 2000);
+            }
+
+            (async function() {
+                let size = _entrySizes[name];
+                if (!size) size = await probeSize(url);            // 列表里没带大小时先探测, 才能做完整性校验
+                if (Number.isFinite(size) && size > DL_SMALL) {
+                    saveBlob(await downloadChunked(name, url, size), name);
+                    release();
+                    return;
+                }
+                directDownload(url, name, true);                    // 小文件走浏览器原生下载
+                setTimeout(release, 2000);
+            })().catch(function(e) {
+                release();
+                Dialog.alert('下载失败：' + ((e && e.message) || '未知错误'));
+            });
         }
 
         function openSubdir(name) {

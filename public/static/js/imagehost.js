@@ -163,6 +163,8 @@ const ImageHost = (function() {
             const base = location.origin;
             grid.innerHTML = list.map(item => {
                 const url = `${base}/i/${item.filename}`;
+                // src_path 非空 = 零拷贝引用文件管理里的原文件 (不额外占空间)
+                const isRef = !!item.src_path;
                 const isImage = item.mime_type.startsWith('image/');
                 const isVideo = item.mime_type.startsWith('video/');
                 const preview = isImage
@@ -175,6 +177,7 @@ const ImageHost = (function() {
                     <div class="ih-card" data-filename="${esc(item.filename)}">
                         <div class="ih-card-preview">${preview}</div>
                         <div class="ih-card-info">
+                            ${isRef ? `<span class="ih-card-ref" title="引用自文件管理：${esc(item.src_path)}（不额外占用空间，删源文件会被拒绝）">引用</span>` : ''}
                             <span class="ih-card-name" title="${esc(item.original_name)}">${esc(item.original_name)}</span>
                             <span class="ih-card-size">${formatSize(item.size)}</span>
                         </div>
@@ -481,6 +484,15 @@ const ImageHost = (function() {
 
         // ===== Embed dialog =====
         showEmbedDialog: function(result) {
+            // 防御: 任何非预期返回 (后端 error 对象 / 字段缺失) 都不该把详情页整个搞崩。
+            const url = result && typeof result.url === 'string' ? result.url : '';
+            if (!url) {
+                window.Dialog
+                    ? Dialog.alert('上传结果异常: ' + ((result && result.error) || '服务端未返回文件地址'))
+                    : alert('上传结果异常');
+                return;
+            }
+            result = Object.assign({ markdown: '', html: '', bbcode: '' }, result);
             const dialog = document.createElement('div');
             dialog.className = 'modal-overlay';
             dialog.innerHTML = `
@@ -491,17 +503,17 @@ const ImageHost = (function() {
                     </div>
                     <div class="modal-body">
                         <div class="ih-embed-preview">
-                            ${result.url.match(/\.(mp4|webm|mov)$/i)
-                                ? `<video src="${esc(result.url)}" controls style="max-width:100%;max-height:200px"></video>`
-                                : result.url.match(/\.(mp3|wav|ogg|flac)$/i)
-                                ? `<audio src="${esc(result.url)}" controls></audio>`
-                                : `<img src="${esc(result.url)}" style="max-width:100%;max-height:200px" />`
+                            ${url.match(/\.(mp4|webm|mov)$/i)
+                                ? `<video src="${esc(url)}" controls style="max-width:100%;max-height:200px"></video>`
+                                : url.match(/\.(mp3|wav|ogg|flac)$/i)
+                                ? `<audio src="${esc(url)}" controls></audio>`
+                                : `<img src="${esc(url)}" style="max-width:100%;max-height:200px" />`
                             }
                         </div>
                         <div class="ih-embed-codes">
                             <label>直链</label>
                             <div class="ih-copy-row">
-                                <input type="text" value="${esc(result.url)}" readonly />
+                                <input type="text" value="${esc(url)}" readonly />
                                 <button class="btn btn-sm" onclick="ImageHost.copyText(this.previousElementSibling.value)">复制</button>
                             </div>
                             <label>Markdown</label>
@@ -572,7 +584,13 @@ const ImageHost = (function() {
 
         // ===== Delete =====
         deleteOne: async function(filename) {
-            if (!(await Dialog.confirm('确定删除此文件？删除后链接将失效。', { danger: true, okText: '删除' }))) return;
+            const item = items.find(i => i.filename === filename);
+            const isRef = !!(item && item.src_path);
+            // 引用型不持有字节: 这里删的只是图床入口, 源文件必须先去文件管理删
+            const msg = isRef
+                ? '确定移除这条图床记录？\n源文件不会被删除，但此直链将失效。'
+                : '确定删除此文件？删除后链接将失效。';
+            if (!(await Dialog.confirm(msg, { danger: true, okText: isRef ? '移除' : '删除' }))) return;
             try {
                 const res = await API.request('DELETE', `/api/image-host/${encodeURIComponent(filename)}`);
                 if (!res.ok) {

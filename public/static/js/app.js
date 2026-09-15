@@ -69,13 +69,11 @@
         try {
             let renamed = false;
             if (newName) {
-                const r = await API.changeUsername(newName);
-                if (r && r.error) { accError.textContent = r.error; accError.style.display = 'block'; return; }
+                await API.changeUsername(newName);
                 renamed = true;
             }
             if (newPw) {
-                const r = await API.changePassword(oldPw, newPw);
-                if (r && r.error) { accError.textContent = r.error; accError.style.display = 'block'; return; }
+                await API.changePassword(oldPw, newPw);
             }
             accountModal.style.display = 'none';
             await Dialog.alert(renamed ? '修改成功，请重新登录' : '修改成功');

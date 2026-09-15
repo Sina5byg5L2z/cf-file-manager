@@ -16,6 +16,10 @@ const DEFAULTS = {
   preview_text:    { mobile: 512 * 1024, desktop: 1 * MB },   // 文本/代码预览上限
   preview_markdown:{ mobile: 256 * 1024, desktop: 512 * 1024 },// Markdown 预览上限
   preview_html:    { mobile: 1 * MB,     desktop: 5 * MB },   // HTML 预览上限
+  // 单次下载窗口(字节): 既是服务端 Range 响应上限, 也是页面内分片下载的每段大小。
+  // 代价是 CPU: 实测读 ~25~33ms CPU/MiB(D1 行 → 字节反序列化), 平台掐断点约 2.0s CPU
+  // (= 60~90MiB), 故 8MiB 留 ~8x 余量。上限 32MiB 是因为超过它单次响应就接近掐断点。
+  download_range:  8 * MB,
 };
 
 const DEVICE_KEYS = ['mobile', 'desktop'];
@@ -24,6 +28,8 @@ const PREVIEW_MIN = 64 * 1024;
 const PREVIEW_MAX = 50 * MB;
 const MAX_RULES = 20;
 const RANGE_MAX = 2048 * MB; // 范围防御上限 2GB
+const DOWNLOAD_RANGE_MIN = 1 * MB;
+const DOWNLOAD_RANGE_MAX = 32 * MB;
 
 function clampInt(v, min, max, fallback) {
   const n = parseInt(v, 10);
@@ -74,6 +80,7 @@ function normalize(input, maxUpload) {
       }
     }
   }
+  out.download_range = clampInt(src.download_range, DOWNLOAD_RANGE_MIN, DOWNLOAD_RANGE_MAX, DEFAULTS.download_range);
   return out;
 }
 
@@ -87,6 +94,32 @@ async function readStored(db) {
 
 function maxUploadOf(env) {
   return parseInt(env.MAX_UPLOAD_SIZE || '209715200', 10);
+}
+
+// ---- 服务端读取"单次下载窗口" ----
+// 优先级: 用户在「参数设置」里存的值 → env.RANGE_MAX(部署期兜底) → 内置默认 8MiB。
+// 进程内记忆 30s: 取文件是热路径, 不能每次请求都读 D1; 保存设置后立即清掉这份记忆。
+let RANGE_MEMO = { v: 0, exp: 0 };
+export function resetRangeMemo() {
+  RANGE_MEMO = { v: 0, exp: 0 };
+}
+export async function rangeMaxOf(env, db) {
+  const now = Date.now();
+  if (RANGE_MEMO.v && now < RANGE_MEMO.exp) return RANGE_MEMO.v;
+  let v;
+  try {
+    const stored = await readStored(db);
+    if (stored && stored.download_range != null) {
+      v = normalize(stored, maxUploadOf(env)).download_range;
+    }
+  } catch { /* 表缺失等情况退回 env / 默认值 */ }
+  if (!Number.isFinite(v)) {
+    const e = parseInt(env && env.RANGE_MAX, 10);
+    v = Number.isFinite(e) && e > 0 ? Math.min(e, DOWNLOAD_RANGE_MAX) : DEFAULTS.download_range;
+  }
+  v = Math.min(DOWNLOAD_RANGE_MAX, Math.max(DOWNLOAD_RANGE_MIN, v));
+  RANGE_MEMO = { v, exp: now + 30000 };
+  return v;
 }
 
 // GET /api/settings — 公开接口(分享页也读), 走边缘缓存 5 分钟, PUT 时主动失效
@@ -116,5 +149,6 @@ export async function saveSettings(req, env, db) {
       .bind('ui', value).run();
   }
   await cacheDel('app-settings');
+  resetRangeMemo(); // 新窗口立即生效, 不必等 30s 记忆过期
   return json({ settings: JSON.parse(value) });
 }

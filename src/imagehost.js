@@ -1,8 +1,10 @@
 // ============================================================================
 // imagehost.js — 图床 (对应原版 routes/image_host.rs)
-// 存储: image_host(元数据) + blobs(key='i:<filename>')
-// 降耗: /i/<filename> 文件名不可变 → 边缘缓存 1 年 + immutable,
-//       二次访问 0 D1 读、浏览器也不再回源; 删除时主动失效
+// 存储: image_host(元数据) + 按 src_path 区分两种归属
+//   - src_path IS NULL  → 自持: blobs key='i:<filename>' (直传上传的条目)
+//   - src_path NOT NULL → 引用: 零拷贝, 字节仍是文件管理的 'f:<src_path>'
+// 降耗: 自持条目文件名不可变 → 边缘缓存 1 年 + immutable, 二次访问 0 D1 读;
+//       引用条目内容随源文件变, 只能短缓存, 源变更(改名/覆盖/删除)时主动失效。
 // ============================================================================
 
 import {
@@ -70,7 +72,13 @@ export async function uploadInit(req, env, db) {
 
 // 分片上传 chunk/complete 与文件管理器共用同一实现 (vfs.js), 由路由按 kind 分发
 
-// ---------------- 从文件管理器导入 ----------------
+// ---------------- 从文件管理器导入 (零拷贝引用) ----------------
+// 不复制字节: 只写一行元数据, src_path 指向文件管理里的原文件。
+// 一份字节两个入口 —— /f 走文件管理器, /i 走图床直链。
+// 源文件的生命周期由 vfs.js 维护:
+//   删除 → 拒绝(前置校验, 提示先删图床条目)
+//   改名/移动 → 同步改写 src_path
+//   覆盖上传 → 直链跟随更新, 并失效图床缓存
 export async function importFromFiles(req, env, db) {
   let body;
   try { body = await req.json(); } catch { return jerr('请求格式错误'); }
@@ -83,12 +91,17 @@ export async function importFromFiles(req, env, db) {
 
   const ext = fileExt(node.name);
   const filename = generateFilename(ext);
-  // 服务端复制: 单条 INSERT..SELECT, 不经浏览器
-  await db.batch([
-    db.prepare('INSERT INTO blobs (key, idx, data) SELECT ?2, idx, data FROM blobs WHERE key = ?1').bind('f:' + node.path, 'i:' + filename),
-    db.prepare('INSERT INTO image_host (filename, original_name, mime_type, size, upload_time) VALUES (?1,?2,?3,?4,?5)')
-      .bind(filename, node.name, mime, node.size, new Date().toISOString()),
-  ]);
+  try {
+    await db.prepare(
+      'INSERT INTO image_host (filename, original_name, mime_type, size, upload_time, src_path) VALUES (?1,?2,?3,?4,?5,?6)',
+    ).bind(filename, node.name, mime, node.size, new Date().toISOString(), node.path).run();
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/Exceeded maximum DB size|7500/i.test(msg)) {
+      return jerr('图床空间不足：D1 数据库已达存储上限，请先清理数据', 507);
+    }
+    return jerr(`图床写入失败: ${msg}`, 500);
+  }
   return buildUploadResponse(req, filename, node.name, mime);
 }
 
@@ -97,18 +110,36 @@ export async function serveImage(req, env, db, filename) {
   if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
     return jerr('无效文件名');
   }
-  // 元数据走边缘缓存 5 分钟; 文件体不可变 → 缓存 1 年
+  // 元数据走边缘缓存 5 分钟; 自持条目内容不可变 → 缓存 1 年
   let meta = null;
   const ck = `IH:${filename}`;
   const hit = await cacheGet(ck);
   if (hit) meta = await hit.json();
   if (!meta) {
-    meta = await db.prepare('SELECT filename, mime_type, size FROM image_host WHERE filename = ?1').bind(filename).first();
+    meta = await db.prepare('SELECT filename, mime_type, size, src_path FROM image_host WHERE filename = ?1').bind(filename).first();
     if (meta) await cachePut(ck, json(meta), 300);
   }
   if (!meta) {
     return json({ error: '文件不存在' }, 404, { 'Access-Control-Allow-Origin': '*' });
   }
+
+  // 引用型: 字节在文件管理的 'f:<src_path>'。size/nchunks 实时从 fs_nodes 取,
+  // 覆盖上传改了大小也不会读到过期元数据。缓存必须短 + 非 immutable:
+  // 内容会随源文件变化, 无法承诺"同名同内容"。
+  if (meta.src_path) {
+    const src = await db.prepare('SELECT size, mime, nchunks FROM fs_nodes WHERE path = ?1 AND is_dir = 0')
+      .bind(meta.src_path).first();
+    if (!src) {
+      // 正常路径下删除源文件已被拒绝, 这里只是兜底(如历史数据/直连 DB 改动)
+      return json({ error: '源文件已不存在' }, 404, { 'Access-Control-Allow-Origin': '*' });
+    }
+    return serveFileContent(req, env, db, {
+      key: 'f:' + meta.src_path, size: src.size, mime: src.mime || meta.mime_type,
+      filename, nchunks: src.nchunks,
+      inline: true, cacheTtl: 300, immutable: false, cacheKeyPrefix: 'pub',
+    });
+  }
+
   return serveFileContent(req, env, db, {
     key: 'i:' + filename, size: meta.size, mime: meta.mime_type,
     filename, inline: true, cacheTtl: 31536000, immutable: true, cacheKeyPrefix: 'pub',
@@ -132,7 +163,7 @@ export async function list(req, env, db, url) {
   const binds = search ? [`%${search.replace(/([%_\\])/g, '\\$1')}%`] : [];
   const totalRow = await db.prepare(`SELECT COUNT(*) AS c FROM image_host ${where}`).bind(...binds).first();
   const rows = await db.prepare(
-    `SELECT filename, original_name, mime_type, size, upload_time FROM image_host ${where} ORDER BY upload_time DESC LIMIT ?${search ? 2 : 1} OFFSET ?${search ? 3 : 2}`,
+    `SELECT filename, original_name, mime_type, size, upload_time, src_path FROM image_host ${where} ORDER BY upload_time DESC LIMIT ?${search ? 2 : 1} OFFSET ?${search ? 3 : 2}`,
   ).bind(...binds, pageSize, offset).all();
   const res = json({ items: rows.results || [], total: totalRow.c, page, page_size: pageSize });
   await cachePut(ck, res.clone(), 30);
@@ -140,16 +171,25 @@ export async function list(req, env, db, url) {
 }
 
 // ---------------- 删除 ----------------
+// 引用型: 只删元数据行, 源文件与其字节完全不动 (删的是"图床入口", 不是文件)。
+// 自持型: 连 i:<filename> 的字节一起删。
 export async function deleteImage(req, env, db, filename) {
   if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
     return jerr('无效文件名');
   }
-  await db.batch([
-    db.prepare('DELETE FROM blobs WHERE key = ?1').bind('i:' + filename),
-    db.prepare('DELETE FROM image_host WHERE filename = ?1').bind(filename),
-  ]);
-  await invalidateIhCache(filename);
+  const meta = await db.prepare('SELECT src_path, size FROM image_host WHERE filename = ?1').bind(filename).first();
+  const refKey = meta && meta.src_path ? 'f:' + meta.src_path : 'i:' + filename;
+
+  const stmts = [];
+  if (!meta || !meta.src_path) {
+    stmts.push(db.prepare('DELETE FROM blobs WHERE key = ?1').bind('i:' + filename));
+  }
+  stmts.push(db.prepare('DELETE FROM image_host WHERE filename = ?1').bind(filename));
+  await db.batch(stmts);
+
+  // 内容缓存键含 size; 有元数据时按实际 size 精确删除
+  await invalidateIhCache(filename, meta ? [`F:pub:${refKey}:${meta.size}`] : []);
   // 失效列表缓存 (页数未知, 刷常见前几页)
   await Promise.all([1, 2, 3].flatMap((p) => [24, 100].map((ps) => cacheDel(`IL:${p}:${ps}:`))));
-  return json({ success: true });
+  return json({ success: true, referenced: !!(meta && meta.src_path) });
 }

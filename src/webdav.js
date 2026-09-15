@@ -5,7 +5,8 @@
 // ============================================================================
 
 import { sanitizeRel, mimeFromName } from './util.js';
-import { getNode, serveFileContent, ensureDirs, moveNode, invalidateFileCache } from './vfs.js';
+import { getNode, serveFileContent, ensureDirs, moveNode, invalidateFileCache,
+  ihRefs, ihRefsMessage, syncIhOnOverwrite } from './vfs.js';
 import { verifyCredentials } from './auth.js';
 
 const NODE_COLS = 'path, parent, name, is_dir, size, mime, created_at, modified_at, nchunks';
@@ -178,6 +179,8 @@ async function davPut(req, db, clean) {
     .bind(clean, parent, name, size, mimeFromName(name), now, idx));
   await db.batch(stmts);
   if (old && !old.is_dir) await invalidateFileCache(clean, old.size);
+  // 被图床引用的源文件被覆盖: 直链内容跟随变化
+  if (old && !old.is_dir) await syncIhOnOverwrite(db, clean, size, old.size);
   return new Response(null, { status: 201 });
 }
 
@@ -185,6 +188,14 @@ async function davDelete(db, clean) {
   if (!clean) return new Response(null, { status: 403 });
   const node = await getNode(db, clean);
   if (!node) return new Response(null, { status: 404 });
+  // 图床零拷贝引用: 字节只有这一份, 删除前先要求解除引用
+  const refs = await ihRefs(db, clean);
+  if (refs.length) {
+    return new Response(ihRefsMessage(refs, node.is_dir), {
+      status: 409,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    });
+  }
   await db.batch([
     db.prepare('DELETE FROM blobs WHERE key IN (SELECT \'f:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(clean),
     db.prepare('DELETE FROM blobs WHERE key IN (SELECT \'t:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(clean),

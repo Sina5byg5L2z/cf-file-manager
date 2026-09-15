@@ -32,7 +32,25 @@ const API = {
 
     async json(method, url, body) {
         const res = await this.request(method, url, body);
-        return res.json();
+        let data = null;
+        try {
+            data = await res.json();
+        } catch {
+            // 非 JSON 响应 (边缘错误页 1102/5xx 等): 统一成 Error 并在 message 里带状态码
+            const e = new Error(`${method} ${url} 请求失败 (HTTP ${res.status})`);
+            e.status = res.status;
+            throw e;
+        }
+        // 后端错误一律以 {error: "..."} 形式返回, 状态码非 2xx:
+        // 必须在这里抛出, 否则调用方拿到的是 {error} 对象而不是预期数据,
+        // 后续取值会抛 "Cannot read properties of undefined" 这类二次错误, 掩盖真实原因。
+        if (!res.ok) {
+            const e = new Error((data && data.error) || `${method} ${url} 请求失败 (HTTP ${res.status})`);
+            e.status = res.status;
+            e.data = data;
+            throw e;
+        }
+        return data;
     },
 
     // Auth
@@ -55,73 +73,116 @@ const API = {
     listFiles(path = '') {
         return this.json('GET', `/api/files?path=${encodeURIComponent(path)}`);
     },
-    async downloadFile(path, size, onProgress) {
-        // 免费版 10ms CPU: 服务端 Range 窗口封顶 1MB, 大文件无法单请求下载
-        // 策略: 并发分块 + 逐块自动重试 (边缘连接长链路串行会被掐断, 任何一段抖动只重试该段)
-        const BIG = 4 * 1024 * 1024;
-        if (!size || size <= BIG) {
-            const a = document.createElement('a');
-            a.href = `/api/files/download?path=${encodeURIComponent(path)}&token=${this.token}`;
-            a.download = '';
-            a.style.display = 'none';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            return;
+    // ---- 下载 ----
+    // 单次 Range 窗口: 服务端按「参数设置 → 单次下载窗口」封顶, 这里取同一值切段
+    _dlWindow() {
+        try {
+            const v = window.AppSettings && AppSettings.downloadRange && AppSettings.downloadRange();
+            if (Number.isFinite(v) && v >= 1048576) return v;
+        } catch (e) { /* 未加载设置时用默认 */ }
+        return 8 * 1024 * 1024;
+    },
+    // 用 1 字节 Range 探测总大小 (Content-Range: bytes 0-0/<total>)
+    async probeSize(url) {
+        const res = await fetch(url, { headers: { Range: 'bytes=0-0' } });
+        const cr = res.headers.get('Content-Range');
+        if (cr && cr.includes('/')) {
+            const t = parseInt(cr.split('/')[1], 10);
+            if (Number.isFinite(t)) return t;
         }
-        const url = `/api/files/download?path=${encodeURIComponent(path)}&token=${this.token}`;
-        const W = 1024 * 1024; // 预期窗口 1MB; 服务端窗口更小时按 Content-Range 实际返回自适应补拉
-        const map = new Map(); // start -> Uint8Array
-        const pending = [];
-        for (let s = 0; s < size; s += W) pending.push(s);
-        let nextIdx = 0;
-        const total = pending.length;
-
-        const worker = async () => {
-            for (;;) {
-                const i = nextIdx++;
-                if (i >= pending.length) return;
-                const s = pending[i];
-                for (let attempt = 0; ; attempt++) {
-                    try {
-                        const res = await fetch(url, { headers: { Range: `bytes=${s}-` } });
-                        if (res.status !== 206 && !res.ok) throw new Error(`HTTP ${res.status}`);
-                        const buf = new Uint8Array(await res.arrayBuffer());
-                        if (!buf.length) throw new Error('空响应');
-                        const cr = res.headers.get('Content-Range'); // bytes s-e/total
-                        if (!cr) throw new Error('缺少 Content-Range');
-                        const seg = cr.split(/[-/ ]/); // [bytes, start, end, total]
-                        if (parseInt(seg[1], 10) !== s) throw new Error('范围错位');
-                        const end = parseInt(seg[2], 10);
-                        map.set(s, buf);
-                        if (onProgress) onProgress(map.size / total);
-                        if (end + 1 < s + W && end + 1 < size) pending.push(end + 1); // 服务端窗口被封顶得更小 → 补拉余量
-                        break;
-                    } catch (e) {
-                        if (attempt >= 4) throw new Error(`下载中断 (bytes=${s}, ${e.message})`);
-                        await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
-                    }
-                }
-            }
-        };
-        await Promise.all(Array.from({ length: 3 }, worker)); // 并发 3, 避免触发限流
-
-        const parts = [];
-        for (let s = 0; s < size;) {
-            const buf = map.get(s);
-            if (!buf) throw new Error('下载数据缺失');
-            parts.push(buf);
-            s += buf.length;
-        }
-        const blob = new Blob(parts);
+        const len = res.headers.get('Content-Length');
+        return len ? parseInt(len, 10) : NaN;
+    },
+    _saveBlob(blob, name) {
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
-        a.download = path.split('/').pop() || 'download';
+        a.download = name;
         a.style.display = 'none';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+    },
+    _directDownload(url) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    },
+    // 分片下载。完整性一律以"文件总大小"为准, 三道校验:
+    //   ① 响应声明总长 (Content-Range 的 /total) = 已知总长;
+    //   ② 每段实际字节数 = 该段承诺长度;
+    //   ③ 拼装后 blob.size = 已知总长 —— 不等就报错, 绝不当成功交出残缺文件。
+    // 单段失败折半窗口重试(最小 1MiB): 平台在 CPU 上限处会静默截断, 只有小窗口能救回来。
+    async _rangeDownload(url, total, onProgress) {
+        const MAX_W = this._dlWindow(), MIN_W = 1024 * 1024, CONC = 3;
+        const chunks = [];
+        for (let s = 0; s < total; s += MAX_W) chunks.push({ start: s, end: Math.min(s + MAX_W, total) });
+        const parts = new Array(chunks.length);
+        let got = 0, next = 0;
+
+        const worker = async () => {
+            for (;;) {
+                const i = next++;
+                if (i >= chunks.length) return;
+                const c = chunks[i];
+                const piece = [];
+                let p = c.start, len = MAX_W;
+                while (p < c.end) {
+                    for (let attempt = 0; ; attempt++) {
+                        try {
+                            const want = Math.min(p + len, c.end);
+                            const res = await fetch(url, { headers: { Range: `bytes=${p}-${want - 1}` } });
+                            if (res.status !== 206 && !res.ok) throw new Error(`HTTP ${res.status}`);
+                            const buf = new Uint8Array(await res.arrayBuffer());
+                            const cr = res.headers.get('Content-Range'); // bytes start-end/total
+                            if (!cr) throw new Error('缺少 Content-Range');
+                            const seg = cr.split(/[-/ ]/); // [bytes, start, end, total]
+                            const declared = parseInt(seg[3], 10);
+                            if (Number.isFinite(declared) && declared !== total) {
+                                throw new Error(`文件大小与预期不符（服务端 ${declared} / 预期 ${total} 字节）`);
+                            }
+                            if (parseInt(seg[1], 10) !== p) throw new Error('范围错位');
+                            const end = Math.min(parseInt(seg[2], 10), c.end - 1);
+                            if (buf.length !== end - p + 1) throw new Error(`响应被截断（${buf.length}/${end - p + 1} 字节）`);
+                            piece.push(buf);
+                            got += buf.length;
+                            if (onProgress) onProgress(got / total);
+                            p = end + 1; // 服务端窗口更小时也照此续拉
+                            break;
+                        } catch (e) {
+                            if (attempt >= 4) throw new Error(`从第 ${p} 字节起下载失败：${e.message}`);
+                            len = Math.max(MIN_W, len >> 1); // 折半窗口, 降低单次 CPU
+                            await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+                        }
+                    }
+                }
+                parts[i] = piece;
+            }
+        };
+        await Promise.all(Array.from({ length: CONC }, worker));
+
+        const blob = new Blob(parts.flat());
+        if (blob.size !== total) throw new Error(`下载不完整：实收 ${blob.size} / 应有 ${total} 字节，已放弃保存`);
+        return blob;
+    },
+    async downloadFile(path, size, onProgress) {
+        const url = `/api/files/download?path=${encodeURIComponent(path)}&token=${this.token}`;
+        const name = path.split('/').pop() || 'download';
+        try {
+            let total = parseInt(size, 10);
+            if (!Number.isFinite(total) || total <= 0) total = await this.probeSize(url); // 调用方没带大小时先探测
+            if (!Number.isFinite(total)) throw new Error('读不到文件大小，无法校验完整性');
+            if (total <= 4 * 1024 * 1024) { this._directDownload(url); return; } // 小文件走浏览器原生下载
+            this._saveBlob(await this._rangeDownload(url, total, onProgress), name);
+        } catch (e) {
+            // 下载失败必须让用户看见 (之前未捕获的 Promise 会静默吞掉, 只留下半个文件)
+            const msg = `下载失败：${(e && e.message) || '未知错误'}`;
+            if (window.Dialog && window.Dialog.alert) window.Dialog.alert(msg); else window.alert(msg);
+        }
     },
     uploadFile(path, formData, onProgress) {
         return new Promise((resolve, reject) => {
@@ -135,7 +196,8 @@ const API = {
         });
     },
     mkdir(path, name) { return this.json('POST', '/api/files/mkdir', { path, name }); },
-    deleteFile(path) { return this.request('DELETE', `/api/files?path=${encodeURIComponent(path)}`); },
+    // 删除被图床引用的文件时后端返回 409 {error}, 必须走 json() 才不会被当成成功吞掉
+    deleteFile(path) { return this.json('DELETE', `/api/files?path=${encodeURIComponent(path)}`); },
     rename(path, newName) { return this.json('PUT', '/api/files/rename', { path, new_name: newName }); },
     moveFile(from, to) { return this.json('PUT', '/api/files/move', { from, to }); },
     copyFile(from, to) { return this.json('PUT', '/api/files/copy', { from, to }); },

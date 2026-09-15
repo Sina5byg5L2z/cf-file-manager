@@ -14,6 +14,12 @@ import {
   blobStream, crcOfStream, zipStream, randomId,
 } from './util.js';
 import { validateToken } from './auth.js';
+import { rangeMaxOf } from './settings.js';
+
+// 整文件(无 Range)单次流式响应的安全上限: 超过它平台会在 CPU 上限处静默截断
+// (实测掐断点约 2.0s CPU ≈ 60~90MiB), 取 32MiB (~1.0s CPU) 留一倍余量;
+// 超过则明确回 413 报错, 而不是发一个"看起来成功"的残缺文件。
+const FULL_STREAM_MAX = 32 * 1024 * 1024;
 
 // ---------------- 元数据访问 ----------------
 const NODE_COLS = 'path, parent, name, is_dir, size, mime, created_at, modified_at, nchunks';
@@ -44,7 +50,59 @@ export async function invalidateFileCache(path, size) {
     cacheDel(`F:thumb:${k}:${size}`),
     cacheDel(`F:share:${k}:${size}`),
     cacheDel(`F:dav:${k}:${size}`),
+    // 'pub' 前缀: 分享直链 + 图床引用型条目都从 'f:<path>' 读, 同一份字节同一缓存键
+    cacheDel(`F:pub:${k}:${size}`),
   ]);
+}
+
+// ---------------- 图床引用维护 ----------------
+// 图床「从文件管理导入」是零拷贝引用: image_host.src_path 指向 'f:<path>',
+// 一份字节两个入口。因此源文件的删除/改名/覆盖都必须同步处理引用方,
+// 否则 /i/<name> 直链会静默 404 或长时间返回旧内容。
+
+// 反查引用了指定路径(含其整棵子树)的图床条目
+export async function ihRefs(db, path) {
+  const clean = sanitizeRel(path);
+  if (!clean) return [];
+  const r = await db.prepare(
+    "SELECT filename, original_name FROM image_host WHERE src_path = ?1 OR src_path LIKE ?1 || '/%'",
+  ).bind(clean).all();
+  return r.results || [];
+}
+
+// 拒绝删除时给用户的说明
+export function ihRefsMessage(refs, isDir) {
+  const names = refs.slice(0, 3).map((r) => r.original_name || r.filename).join('、');
+  const more = refs.length > 3 ? ` 等 ${refs.length} 项` : '';
+  return `该${isDir ? '目录' : '文件'}已被图床引用（${names}${more}），请先删除对应的图床条目`;
+}
+
+// 源文件改名/移动: 同步改写引用路径并失效图床缓存
+export async function rekeyIhRefs(db, fromPath, toPath) {
+  const from = sanitizeRel(fromPath);
+  const to = sanitizeRel(toPath);
+  if (!from || from === to) return;
+  const refs = await ihRefs(db, from);
+  if (!refs.length) return;
+  // src_path 不含 'f:' 前缀 → 偏移 from.length + 1 (blobs 那边是 +3)
+  const off = from.length + 1;
+  await db.prepare(
+    "UPDATE image_host SET src_path = ?2 || substr(src_path, ?3) WHERE src_path = ?1 OR src_path LIKE ?1 || '/%'",
+  ).bind(from, to, off).run();
+  // 缓存里存着旧的 src_path 与旧的内容键
+  await Promise.all(refs.map((r) => invalidateIhCache(r.filename)));
+}
+
+// 源文件被覆盖写: 直链内容跟随变化 → 同步 size 并失效图床缓存
+export async function syncIhOnOverwrite(db, path, newSize, oldSize) {
+  const clean = sanitizeRel(path);
+  if (!clean) return;
+  const refs = await ihRefs(db, clean);
+  if (!refs.length) return;
+  await db.prepare('UPDATE image_host SET size = ?2 WHERE src_path = ?1').bind(clean, newSize).run();
+  const keys = new Set([`F:pub:f:${clean}:${newSize}`]);
+  if (oldSize != null && oldSize !== newSize) keys.add(`F:pub:f:${clean}:${oldSize}`);
+  await Promise.all(refs.map((r) => invalidateIhCache(r.filename, [...keys])));
 }
 
 // ---------------- 列表 ----------------
@@ -120,6 +178,9 @@ export async function deleteFile(req, env, db, url) {
   if (!path) return jerr('无法删除根目录');
   const node = await getNode(db, path);
   if (!node) return jerr('文件不存在', 404);
+  // 图床零拷贝引用: 字节只有这一份, 删了直链就没了 → 先要求解除引用
+  const refs = await ihRefs(db, path);
+  if (refs.length) return jerr(ihRefsMessage(refs, node.is_dir), 409);
   await deleteSubtree(db, path);
   await invalidateFileCache(path, node.size);
   await invalidateDir(db, node.parent);
@@ -138,6 +199,9 @@ export async function batchDelete(req, env, db) {
     if (!path) { errors.push(`${raw}: invalid path`); continue; }
     const node = await getNode(db, path);
     if (!node) { errors.push(`${path}: not found`); continue; }
+    // 被图床引用的路径跳过 (不阻断其余项), 逐条把原因回传前端
+    const refs = await ihRefs(db, path);
+    if (refs.length) { errors.push(`${path}: ${ihRefsMessage(refs, node.is_dir)}`); continue; }
     await deleteSubtree(db, path);
     await invalidateFileCache(path, node.size);
     parents.add(node.parent);
@@ -176,6 +240,8 @@ export async function moveNode(db, fromPath, toDir, newName) {
       db.prepare('UPDATE fs_nodes SET path = ?2, parent = ?3, name = ?4, modified_at = ?5 WHERE path = ?1').bind(from, sp.path, sp.parent, name, now),
     ]);
   }
+  // 图床零拷贝引用: 源文件/目录换了路径, 必须同步改写 src_path, 否则直链 404
+  await rekeyIhRefs(db, from, sp.path);
   await invalidateDir(db, node.parent);
   await invalidateDir(db, sp.parent);
   return { ok: true };
@@ -302,6 +368,8 @@ export async function uploadFile(req, env, db, url) {
     const n = await writeBlob(db, 'f:' + sp.path, data);
     await upsertFileNode(db, sp.path, data.length, mimeFromName(name), n);
     if (old && !old.is_dir) await invalidateFileCache(sp.path, old.size);
+    // 被图床引用的源文件被覆盖: 直链内容跟随变化 (同步 size + 失效图床缓存)
+    if (old && !old.is_dir) await syncIhOnOverwrite(db, sp.path, data.length, old.size);
     uploaded.push(name);
   }
   for (const p of parents) await invalidateDir(db, p);
@@ -537,6 +605,8 @@ export async function uploadComplete(req, env, db) {
   }
   const sp = splitPath(session.target);
   if (old && !old.is_dir) await invalidateFileCache(session.target, old.size);
+  // 被图床引用的源文件被覆盖: 直链内容跟随变化 (同步 size + 失效图床缓存)
+  if (old && !old.is_dir) await syncIhOnOverwrite(db, session.target, size, old.size);
   await invalidateDir(db, sp.parent);
   return json({ done: true, filename: session.filename, path: session.target });
 }
@@ -555,10 +625,21 @@ export async function serveFileContent(req, env, db, opts) {
 
   const range = parseRange(req.headers.get('Range'), size);
 
-  // 免费版 10ms CPU: Range 窗口封顶 (浏览器播放器按 Content-Range 自动链式续传后续窗口)
-  const RANGE_MAX = Math.max(CHUNK_SIZE, parseInt(env.RANGE_MAX || '524288', 10));
+  // Range 窗口封顶 = 单次响应的 CPU 预算 (成本主要在 D1 行反序列化成字节, 实测 25~33ms CPU/MiB)。
+  // 窗口可在「参数设置」里改, 客户端与播放器按响应里的 Content-Range 逐段续拉。
+  // 下限 CHUNK_SIZE (1MiB): 窗口不该小于一个存储行, 否则读了整行只吐一部分, 白花 D1 读 + 裁剪开销。
+  const RANGE_MAX = Math.max(CHUNK_SIZE, await rangeMaxOf(env, db));
   if (range && range !== 'unsatisfiable' && range.end - range.start + 1 > RANGE_MAX) {
     range.end = range.start + RANGE_MAX - 1;
+  }
+
+  // 整文件请求超过安全预算: 明确 413, 绝不静默截断
+  if (!range && size > FULL_STREAM_MAX) {
+    return json({
+      error: '文件过大，单次完整传输无法保证完整，请使用页面内的下载按钮（分片下载）',
+      size,
+      full_stream_max: FULL_STREAM_MAX,
+    }, 413, { 'Access-Control-Allow-Origin': '*' });
   }
 
   // 尝试边缘缓存 (仅整文件且体积允许)
@@ -846,9 +927,14 @@ export async function videoServe(req, env, db, url) {
 }
 
 // ---------------- 图床缓存失效助手 (被 imagehost.js 使用) ----------------
-export async function invalidateIhCache(filename) {
-  await cacheDel(`I:${filename}`);
-  await cacheDel(`IH:${filename}`);
+// extraKeys: 额外的内容缓存键 (F:pub:<dataKey>:<size>)。只有调用方知道内容
+// 挂在 'i:<filename>' (自持) 还是 'f:<src_path>' (引用) 上, 故由调用方传入。
+export async function invalidateIhCache(filename, extraKeys = []) {
+  await Promise.all([
+    cacheDel(`I:${filename}`),
+    cacheDel(`IH:${filename}`),
+    ...extraKeys.map((k) => cacheDel(k)),
+  ]);
 }
 
 function buildUploadResponse(req, filename, origName, mime) {

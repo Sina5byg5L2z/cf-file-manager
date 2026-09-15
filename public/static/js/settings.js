@@ -9,6 +9,7 @@ const AppSettings = {
         preview_text:     { mobile: 524288,   desktop: 1048576 },
         preview_markdown: { mobile: 262144,   desktop: 524288 },
         preview_html:     { mobile: 1048576,  desktop: 5242880 },
+        download_range:   8388608,   // 单次下载窗口(字节): 服务端 Range 上限 = 页面内分片下载每段大小
     },
 
     data: null,        // 服务端加载成功后的完整设置; null = 未加载(用默认)
@@ -33,6 +34,11 @@ const AppSettings = {
     },
     uploadLimit() { return this.merged().upload_limit[this.deviceKey()]; },
     previewLimit(kind) { return this.merged()[kind][this.deviceKey()]; }, // kind: preview_text / preview_markdown / preview_html
+    // 单次下载窗口: 服务端按它封顶 Range 响应, 前端分片下载按它切段 (截断时自动折半)
+    downloadRange() {
+        const v = parseInt(this.merged().download_range, 10);
+        return Number.isFinite(v) && v >= 1048576 ? v : this.defaults.download_range;
+    },
 
     // 用原生 fetch (管理页/分享页通用; 分享页无 api.js 与 token, GET 本就是公开接口)
     load() {
@@ -48,8 +54,8 @@ const AppSettings = {
     },
 
     async save(settings) {
+        // API.saveSettings 走 API.json(), 非 2xx 时内部已抛出 (message 为服务端 error)
         const r = await API.saveSettings(settings);
-        if (r && r.error) throw new Error(r.error);
         this.data = r.settings;
         return r;
     }
@@ -252,6 +258,7 @@ const SettingsUI = {
         }
         document.getElementById('setDeviceHint').textContent =
             AppSettings.isMobile ? '当前设备按「移动端」档生效' : '当前设备按「电脑端」档生效';
+        this._mb('setDownloadRange').value = String(Math.round(AppSettings.downloadRange() / 1048576 * 100) / 100);
         document.getElementById('setError').style.display = 'none';
         this.modal.style.display = 'flex';
     },
@@ -287,11 +294,15 @@ const SettingsUI = {
                 preview_text:     { mobile: readMB('set_preview_text_mobile') * 1048576, desktop: readMB('set_preview_text_desktop') * 1048576 },
                 preview_markdown: { mobile: readMB('set_preview_markdown_mobile') * 1048576, desktop: readMB('set_preview_markdown_desktop') * 1048576 },
                 preview_html:     { mobile: readMB('set_preview_html_mobile') * 1048576, desktop: readMB('set_preview_html_desktop') * 1048576 },
+                download_range:   Math.round(readMB('setDownloadRange') * 1048576),
             };
             if (!Number.isFinite(settings.upload_limit.mobile) || !Number.isFinite(settings.upload_limit.desktop)
                 || Object.values(settings.preview_text).concat(Object.values(settings.preview_markdown), Object.values(settings.preview_html))
                     .some((v) => !Number.isFinite(v) || v <= 0)) {
                 throw new Error('请填写有效的数值');
+            }
+            if (!Number.isFinite(settings.download_range) || settings.download_range < 1048576 || settings.download_range > 33554432) {
+                throw new Error('单次下载窗口需在 1 ~ 32 MB 之间');
             }
             await AppSettings.save(settings);
             this._close();

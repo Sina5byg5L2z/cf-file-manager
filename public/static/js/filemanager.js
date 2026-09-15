@@ -336,8 +336,13 @@ const FM = {
                 break;
             case 'delete':
                 if (await Dialog.confirm(`确定删除 "${entry.name}"?`, { danger: true, okText: '删除' })) {
-                    await API.deleteFile(path);
-                    this.navigate(this.currentPath);
+                    try {
+                        await API.deleteFile(path);
+                        this.navigate(this.currentPath);
+                    } catch (e) {
+                        // 后端 409: 该文件被图床引用 (零拷贝共享同一份字节, 删了直链就失效)
+                        Dialog.alert('删除失败: ' + (e.message || '未知错误'));
+                    }
                 }
                 break;
             case 'copy':
@@ -625,9 +630,16 @@ const FM = {
             return this.currentPath ? `${this.currentPath}/${e.name}` : e.name;
         });
         if (await Dialog.confirm(`确定删除 ${paths.length} 个项目?`, { danger: true, okText: '删除' })) {
-            await API.batchDelete(paths);
-            this.selected.clear();
-            this.navigate(this.currentPath);
+            try {
+                const r = await API.batchDelete(paths);
+                this.selected.clear();
+                this.navigate(this.currentPath);
+                // 后端逐项返回失败原因 (被图床引用的会被跳过, 不阻断其余项)
+                const errs = (r && r.errors) || [];
+                if (errs.length) Dialog.alert(`以下 ${errs.length} 项未删除：\n` + errs.join('\n'));
+            } catch (e) {
+                Dialog.alert('删除失败: ' + (e.message || '未知错误'));
+            }
         }
     },
 

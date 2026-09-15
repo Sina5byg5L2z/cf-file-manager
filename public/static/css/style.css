@@ -503,6 +503,8 @@ body.has-upload-launcher .upload-progress{bottom:80px}
 .ih-file-icon{font-size:48px}
 .ih-card-info{padding:8px 12px;display:flex;justify-content:space-between;align-items:center;gap:8px}
 .ih-card-name{font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+/* 零拷贝引用文件管理里的原文件 (不额外占空间) */
+.ih-card-ref{flex:none;font-size:10px;line-height:1;padding:2px 5px;border-radius:var(--radius-sm);background:var(--accent-subtle);color:var(--accent);font-weight:600;cursor:help}
 .ih-card-size{font-size:11px;color:var(--text-tertiary);white-space:nowrap}
 .ih-card-actions{display:flex;gap:4px;padding:6px 12px 10px;justify-content:flex-end}
 .ih-btn{padding:3px 8px;font-size:11px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-overlay);color:var(--text-secondary);cursor:pointer;transition:all .1s}
