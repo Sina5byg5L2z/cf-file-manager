@@ -492,8 +492,19 @@ const FM = {
 
     // Keyboard shortcuts
     setupKeyboard() {
+        // 焦点在可编辑控件里时, 文件管理器的快捷键必须全部让路。
+        // 原来只判 `tagName === 'INPUT'`, 漏了 TEXTAREA —— 「歌曲信息」面板的歌词/译文框
+        // 都是 textarea, 在里面按 Ctrl+A 会被当成"全选文件"(还 preventDefault 掉浏览器默认的全选文字),
+        // Delete/F2/Escape 同样会被抢走(在文本框里按 Delete 应该只删字符, 不该删文件)。
+        // 用 closest 而非只用 tagName: 输入框可能被包在 <label>/<div> 里, 事件目标是内部节点。
+        const inEditable = (t) => {
+            if (!t || !t.tagName) return false;
+            const tag = String(t.tagName).toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+            return !!(t.isContentEditable || (t.closest && t.closest('[contenteditable="true"]')));
+        };
         document.addEventListener('keydown', (e) => {
-            if (e.target.tagName === 'INPUT') return;
+            if (inEditable(e.target)) return;
             if (e.key === 'Delete' && this.selected.size > 0) {
                 this.batchDeleteSelected();
             }
