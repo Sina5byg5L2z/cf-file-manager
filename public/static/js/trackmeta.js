@@ -391,7 +391,9 @@
                         trans: lowered.trans || null,
                         embeddedLrc: src.lyric || null,
                         coverUrl: null,
-                        source: remote && remote.title ? 'manual' : (src.title ? 'id3' : 'filename'),
+                        // 用户填了标题/歌手/原文/译文任一即视为手动 —— 只看 title 会让"只填译文"被误判成文件名来源
+                        source: (remote && (remote.title || remote.artist || remote.lrc || remote.trans))
+                            ? 'manual' : (src.title ? 'id3' : 'filename'),
                     };
                     if (src.cover) {
                         try { out.coverUrl = URL.createObjectURL(src.cover); } catch (e) { out.coverUrl = null; }

@@ -372,7 +372,9 @@
     function applyLyric(synced, trans, roma, source) {
         var L = global.Lyrics;
         var orig = L.parse(synced);
-        state.lines = L.merge(orig, L.parse(trans), L.parse(roma));
+        // 只有译文(用户只贴了译文框): 以译文为骨架, 否则 merge 面对空原文会返回空数组
+        state.lines = orig.length ? L.merge(orig, L.parse(trans), L.parse(roma))
+            : (trans ? (L.transOnly ? L.transOnly(trans) : []) : []);
         state.source = source || 'online';
         syncRejectBtn();
         renderModes();
@@ -389,9 +391,13 @@
         if (!state.current) return;
         var c = state.current;
         // 1) 用户粘贴 / 内嵌歌词 —— 不用联网
+        //    原文与译文任一有内容就走本地: 用户只贴译文时原文是空的, 旧写法只认 synced
+        //    会把译文丢掉还白打一次上游。带时间轴的原文优先, 退而用纯译文。
         var synced = c.lrc || c.embeddedLrc;
-        if (synced && global.Lyrics.hasTimestamps(synced)) {
-            applyLyric(synced, c.trans, null, c.lrc ? 'manual' : 'id3');
+        var hasOrig = synced && global.Lyrics.hasTimestamps(synced);
+        var hasTrans = c.trans && String(c.trans).trim();
+        if (hasOrig || hasTrans) {
+            applyLyric(hasOrig ? synced : null, c.trans, null, c.lrc ? 'manual' : (hasOrig ? 'id3' : 'manual'));
             return;
         }
         if (!global.API) return;
@@ -531,11 +537,11 @@
             return;
         }
         var html = state.lines.map(function (l, i) {
-            var showOrig = state.lyricMode !== 'trans';
+            var showOrig = state.lyricMode !== 'trans' && l.text;
             var showTrans = state.lyricMode !== 'orig' && l.trans;
             if (state.lyricMode === 'trans' && !l.trans) return '';
             var inner = '';
-            if (showOrig) inner += '<div class="mp-line">' + escapeHtml(l.text || '') + '</div>';
+            if (showOrig) inner += '<div class="mp-line">' + escapeHtml(l.text) + '</div>';
             if (showTrans) inner += '<div class="mp-line mp-trans">' + escapeHtml(l.trans) + '</div>';
             if (state.lyricMode === 'both' && l.roma) inner += '<div class="mp-line mp-roma">' + escapeHtml(l.roma) + '</div>';
             if (!inner) inner = '<div class="mp-line">&nbsp;</div>';
@@ -600,10 +606,15 @@
         };
         global.API.saveTrackMeta(payload).then(function (r) {
             var m = (r && r.meta) || payload;
+            // 缓存键含 title/duration —— 保存可能改了标题, 所以新旧两个 key 都要删。
+            // (必须在覆盖 c.title 之前算旧 key, 否则算出来的还是新 key, 旧缓存永远残留)
+            var oldKey = global.TrackMeta ? lyricKey() : null;
             c.title = m.title; c.artist = m.artist; c.album = m.album;
             c.lrc = m.lrc; c.trans = m.trans; c.source = 'manual';
             if (global.TrackMeta) {
-                global.TrackMeta.cache.del(lyricKey());       // 曲名变了, 歌词缓存作废
+                var newKey = lyricKey();
+                global.TrackMeta.cache.del(oldKey);
+                if (newKey !== oldKey) global.TrackMeta.cache.del(newKey);
                 global.TrackMeta.cache.metaPut(c.path, { manual: m, ts: Date.now() });
             }
             renderBar(); renderFull();
@@ -733,5 +744,7 @@
         current: function () { return state.current; },
         queue: function () { return state.queue.slice(); },
         audio: function () { return audio; },
+        // 强制绕过本地缓存重取歌词(「重新联网获取」按钮走的是同一条路)
+        reloadLyrics: function () { if (state.current) refetchLyrics(); },
     };
 })(window);

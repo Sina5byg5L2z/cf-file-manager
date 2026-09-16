@@ -383,13 +383,16 @@ export async function resolveLyrics(env, db, opts) {
   const duration = Number(opts.duration) || 0;
 
   // 1) 用户自己贴的歌词优先级最高(顺便拿到手填的 title/artist)
+  //    注意: 原文与译文任一非空即视为"用户手动提供" —— 只贴译文时原文框是空的,
+  //    旧写法只看 meta.lrc 会把手填的译文整份丢掉, 还白打一次上游。
   let meta = null;
   try {
     meta = await db.prepare('SELECT title, artist, lrc, trans FROM track_meta WHERE path = ?1').bind(path).first();
   } catch { /* 未执行迁移时忽略, 回落到在线源 */ }
-  if (meta && meta.lrc) {
+  if (meta && (meta.lrc || meta.trans)) {
     return {
-      found: true, synced: meta.lrc, plain: null, trans: meta.trans || null, roma: null,
+      found: true, synced: meta.lrc || null, plain: null,
+      trans: meta.trans || null, roma: null,
       source: 'manual', title: meta.title || null, artist: meta.artist || null,
     };
   }

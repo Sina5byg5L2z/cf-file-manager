@@ -176,7 +176,9 @@
         var html = '';
         for (var i = 0; i < lines.length; i++) {
             var l = lines[i];
-            html += '<div class="mp-row" data-i="' + i + '"><div class="mp-line">' + (esc(l.text) || '&nbsp;') + '</div>'
+            // 原文为空时不占位(分享者只填了译文的情形), 否则每行译文上方会多出一条空行
+            html += '<div class="mp-row" data-i="' + i + '">'
+                + (l.text ? '<div class="mp-line">' + esc(l.text) + '</div>' : '')
                 + (l.trans ? '<div class="mp-trans">' + esc(l.trans) + '</div>' : '')
                 + (l.roma ? '<div class="mp-roma">' + esc(l.roma) + '</div>' : '')
                 + '</div>';
@@ -250,6 +252,10 @@
                         .map(function (s) { return { time: -1, text: s, trans: null, roma: null }; });
                     state.timed = false;
                 }
+            } else if (d.found && d.trans && L) {
+                // 分享者只填了译文(原文留空): 以译文为骨架, 否则界面会没有任何歌词
+                state.lines = L.transOnly ? L.transOnly(d.trans) : [];
+                state.timed = state.lines.length ? state.lines[0].time >= 0 : true;
             } else if (d.found && d.plain) {
                 state.timed = false;
                 state.lines = String(d.plain).split(/\r?\n/).filter(function (s) { return s.trim(); })

@@ -99,6 +99,18 @@
         });
     }
 
+    // 只有译文没有原文时用: 以译文自身为骨架, 原文留空。
+    // merge() 是 orig.map(...), 原文为空数组时无论译文有多少行都配不上, 结果恒为空 —— 所以单独走这条。
+    // 无时间轴的纯译文按整段显示(time:-1), hasTimestamps 为 false, 交给页面按静态文本渲染。
+    function transOnly(trans) {
+        var t = parse(trans);
+        if (t.length) {
+            return t.map(function (l) { return { time: l.time, text: '', trans: l.text, roma: null }; });
+        }
+        return String(trans || '').split(/\r?\n/).filter(function (s) { return s.trim(); })
+            .map(function (s) { return { time: -1, text: '', trans: s, roma: null }; });
+    }
+
     // 当前时间对应的行下标; 没有命中返回 -1(开头前奏)
     function indexAt(lines, t) {
         if (!lines || !lines.length) return -1;
@@ -123,6 +135,7 @@
     global.Lyrics = {
         parse: parse,
         merge: merge,
+        transOnly: transOnly,
         indexAt: indexAt,
         formatTime: formatTime,
         hasTimestamps: function (t) { return new RegExp(TS_RE).test(String(t || '')); },
