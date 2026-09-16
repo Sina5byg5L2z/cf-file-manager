@@ -9,6 +9,7 @@ import {
   mimeFromName, isImageName,
 } from './util.js';
 import { getNode, serveFileContent, collectZipEntries, zipStreamResponse } from './vfs.js';
+import { shareLyrics, shareCover } from './lyrics.js';
 
 const SHARE_COLS = 'id, path, password, expires_at, created_at, access_count, last_accessed_at';
 
@@ -127,6 +128,15 @@ export async function accessShare(req, env, db, id, url) {
     // 分享对象不存在 (或目录名不存在)
     if (sub || name) return jerr('无效的路径');
     return jerr('分享内容已被删除', 404);
+  }
+
+  // ---- 歌词 / 封面 (分享页播放器用; 与登录态同一份数据与链路) ----
+  // 放最前面: 这两个不涉及字节流, 但都要先定位到目标文件(目录分享时按 name 下钻)。
+  if (q.has('lyrics') || q.has('cover')) {
+    const target = await resolveFileTarget();
+    if (!target) return jerr('无效的文件');
+    if (q.has('lyrics')) return shareLyrics(req, env, db, target, url);
+    return shareCover(req, env, db, target, url);
   }
 
   // ---- 清晰度接口: Workers 不支持转码, 返回"仅原片" ----

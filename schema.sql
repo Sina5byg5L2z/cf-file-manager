@@ -125,6 +125,23 @@ CREATE INDEX IF NOT EXISTS idx_bj_db ON blob_journal(db_id);
 INSERT OR IGNORE INTO storage_dbs (id, binding, label, role, state, slot_quota, created_at)
 VALUES (1, 'DB', '主库', 'primary', 'active', 10, 1757904000000);
 
+-- 歌词持久化(见 migrations/2026-09-16-lyrics-store.sql)
+-- 只写"取到歌词"的结果(found=1), 长期有效(拉黑/改歌曲信息时删); "没找到"不入库, 只走边缘缓存 6 小时
+CREATE TABLE IF NOT EXISTS lyrics (
+  path       TEXT PRIMARY KEY,
+  found      INTEGER NOT NULL DEFAULT 0,
+  source     TEXT,
+  synced     TEXT,
+  plain      TEXT,
+  trans      TEXT,
+  roma       TEXT,
+  title      TEXT,
+  artist     TEXT,
+  duration   REAL NOT NULL DEFAULT 0,
+  fetched_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lyrics_fetched_at ON lyrics (fetched_at);
+
 -- 歌词拉黑(见 migrations/2026-09-16-lyrics-reject.sql)
 CREATE TABLE IF NOT EXISTS lyrics_reject (
   path    TEXT PRIMARY KEY,

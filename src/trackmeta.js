@@ -11,6 +11,7 @@
 // 自动回落到内嵌标签/文件名解析, 旧行留着无害(不参与任何查询)。
 // ============================================================================
 import { json, jerr, sanitizeRel } from './util.js';
+import { clearStoredLyrics } from './lyrics.js';
 
 const MAX_FIELD = 400;        // title/artist/album 最大长度
 const MAX_LRC = 300 * 1024;   // 单段歌词文本上限 300KB
@@ -114,6 +115,10 @@ export async function putMeta(req, _env, db) {
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
     ).bind(path, title, artist, album, offset, lrc, trans, source, now).run();
   }
+
+  // 歌曲信息一改, 之前按旧标题/歌手存到 D1 的歌词就不一定还是这首歌了 → 失效重取。
+  // (手动贴的歌词存在 track_meta 里, 优先级更高, 不受这里影响)
+  await clearStoredLyrics(db, path);
 
   return json({ meta: { path, title, artist, album, lyric_offset: offset, lrc, trans, source, updated_at: now } });
 }

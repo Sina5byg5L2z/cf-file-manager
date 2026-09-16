@@ -142,6 +142,8 @@
     <script src="/static/vendor/marked@15.0.12.min.js"></script>
     <script src="/static/vendor/purify@3.4.15.min.js"></script>
     <script src="/static/js/settings.js?v=20260915i"></script>
+    <script src="/static/js/lyrics.js?v=20260915a"></script>
+    <script src="/static/js/sharemusic.js?v=20260916a"></script>
     <script>
     (function() {
         const shareId = window.location.pathname.split('/s/')[1]?.split('?')[0]?.split('/')[0] || '';
@@ -362,6 +364,7 @@
                     if (!entry.is_dir) _entrySizes[entry.name] = entry.size;
                     const ext = (entry.name.split('.').pop() || '').toLowerCase();
                     const isImage = isPreviewableImage(ext);
+                    const isAudio = !entry.is_dir && isPreviewableAudio(ext);
                     let icon;
                     if (!entry.is_dir && isImage) {
                         let thumbUrl = '/s/' + shareId + '?thumb=1&name=' + encodeURIComponent(entry.name);
@@ -381,7 +384,8 @@
                         '<div class="file-actions">' +
                         (entry.is_dir
                             ? '<button class="btn btn-sm" data-open="' + esc(entry.name) + '">打开</button>'
-                            : '<button class="btn btn-sm btn-primary" data-download="' + esc(entry.name) + '">下载</button>') +
+                            : (isAudio ? '<button class="btn btn-sm" data-play="' + esc(entry.name) + '">\u25B6 播放</button>' : '')
+                                + '<button class="btn btn-sm btn-primary" data-download="' + esc(entry.name) + '">下载</button>') +
                         '</div></div>';
                 }
                 html += '</div>';
@@ -392,6 +396,9 @@
             // Bind events
             app.querySelectorAll('[data-download]').forEach(btn => {
                 btn.onclick = () => downloadFile(btn.dataset.download);
+            });
+            app.querySelectorAll('[data-play]').forEach(btn => {
+                btn.onclick = (e) => { e.stopPropagation(); playAudio(btn.dataset.play); };
             });
             app.querySelectorAll('[data-open]').forEach(btn => {
                 btn.onclick = () => openSubdir(btn.dataset.open);
@@ -434,7 +441,11 @@
                 '<div class="actions">' +
                 '<button class="btn btn-primary" id="btnDownload">\u2B07 下载</button>';
 
-            if (canPreview(ext)) {
+            // 音频直接给全局播放器(带歌词/可续播), 不再给"预览"按钮 —— 两个入口做同一件事只会让人困惑
+            const isAudioFile = isPreviewableAudio(ext);
+            if (isAudioFile) {
+                html += '<button class="btn" id="btnPlay">\u25B6 播放</button>';
+            } else if (canPreview(ext)) {
                 html += '<button class="btn" id="btnPreview">\uD83D\uDC41\uFE0F 预览</button>';
             }
 
@@ -452,16 +463,43 @@
                 previewBtn.onclick = () => showPreview(data.name, ext, data.size, data.mime);
             }
 
+            const playBtn = document.getElementById('btnPlay');
+            if (playBtn) {
+                playBtn.onclick = () => playAudio(data.name);
+                playAudio(data.name);   // 单文件分享: 直接把播放器摆出来(自动播放可能被浏览器拦截, 用户点一下即播)
+            }
+
             // Auto-preview for images, SVG, PDF, Markdown
             if (isPreviewableImage(ext) || isPreviewableSvg(ext) || isPreviewablePdf(ext) || isPreviewableMarkdown(ext)) {
                 showPreview(data.name, ext, data.size, data.mime);
             }
         }
 
+        // 全局播放器(只读): 底栏常驻 + 展开歌词页。切目录/切预览都不打断播放。
+        function playAudio(name) {
+            if (!window.ShareMusic) { showInlinePreview(name, dirEntries); return; }
+            var list = ShareMusic.audioList(dirEntries, currentSubPath);
+            ShareMusic.play({ name: name, subPath: currentSubPath }, list);
+        }
+        function initShareMusic() {
+            if (!window.ShareMusic) return;
+            ShareMusic.init({
+                shareId: shareId,
+                subPath: function () { return currentSubPath; },
+                password: function () { return currentPassword; }
+            });
+        }
+
         function showInlinePreview(name, entries) {
             var ext = (name.split('.').pop() || '').toLowerCase();
             if (!canPreview(ext)) {
                 downloadFile(name);
+                return;
+            }
+            // 音频交给全局播放器(能续播、有歌词), 不再走预览弹层
+            if (isPreviewableAudio(ext)) {
+                dirEntries = entries || dirEntries;
+                playAudio(name);
                 return;
             }
 
@@ -655,8 +693,9 @@
                 return;
             }
 
-            // Audio — custom player card
+            // Audio — 交给全局播放器(带歌词), 播放器不在时退回原来的音频卡
             if (kind === 'audio') {
+                if (window.ShareMusic) { playAudio(name); return; }
                 area.innerHTML = '<div class="vp-host" style="padding:16px 8px"></div>';
                 window._sharePlayer = AudioPlayer.create(area.querySelector('.vp-host'), fileUrl, { title: name, onDownload: function () { downloadFile(name); } });
                 return;
@@ -989,6 +1028,7 @@
         if (!shareId) {
             showError('无效的分享链接');
         } else {
+            initShareMusic();   // 全局播放器: 先建好, 点音频即用 (密码在点播时才带上)
             load();
         }
     })();

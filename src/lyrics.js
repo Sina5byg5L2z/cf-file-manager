@@ -212,16 +212,26 @@ async function fromItunesCover(artist, title) {
 // GET /api/cover?path=&title=&artist=  →  { found, url?, source? }
 // 只返回热链 URL, 不代理图片字节 —— mzstatic/126.net/dzcdn 都允许直链, Worker 零带宽成本
 export async function getCover(_req, env, db, url) {
+  const path = sanitizeRel(url.searchParams.get('path') || '');
+  if (!path) return jerr('缺少 path');
+  return resolveCover(env, db, {
+    path,
+    title: url.searchParams.get('title') || '',
+    artist: url.searchParams.get('artist') || '',
+  });
+}
+
+// 封面解析核心(管理页 / 分享页共用)。分享页拿不到曲名时返回 found:false, 不抛 4xx。
+async function resolveCover(env, db, opts) {
   const cfg = await lyricsConfigOf(env, db);
   if (!cfg.enabled || cfg.provider === 'off') {
     return json({ found: false, reason: 'disabled' });
   }
-  const path = sanitizeRel(url.searchParams.get('path') || '');
-  if (!path) return jerr('缺少 path');
+  const path = opts.path;
 
   // 曲名优先级与歌词一致: 参数 > 用户编辑 > 文件名解析
-  let title = (url.searchParams.get('title') || '').trim();
-  let artist = (url.searchParams.get('artist') || '').trim();
+  let title = String(opts.title || '').trim();
+  let artist = String(opts.artist || '').trim();
   let meta = null;
   try {
     meta = await db.prepare('SELECT title, artist FROM track_meta WHERE path = ?1').bind(path).first();
@@ -233,7 +243,7 @@ export async function getCover(_req, env, db, url) {
     title = p.title;
     if (!artist) artist = p.artist || '';
   }
-  if (!title) return jerr('无法从文件名解析出歌名, 请手动填写歌曲信息');
+  if (!title) return json({ found: false, reason: 'no-title' });
 
   // 缓存键带 netease_base: 换实例后旧结果不串
   const key = `cover:${cfg.netease_base || ''}:${(artist || '').toLowerCase()}:${title.toLowerCase()}`;
@@ -262,29 +272,131 @@ export async function getCover(_req, env, db, url) {
   return jsonResponse(payload);
 }
 
-// ---------------- 主入口 ----------------
-// GET /api/lyrics?path=&duration=&title=&artist=
-export async function getLyrics(_req, env, db, url) {
-  const cfg = await lyricsConfigOf(env, db);
-  if (!cfg.enabled || cfg.provider === 'off') {
-    return json({ found: false, reason: 'disabled' });
-  }
-  const path = sanitizeRel(url.searchParams.get('path') || '');
-  if (!path) return jerr('缺少 path');
-  const duration = parseFloat(url.searchParams.get('duration') || '') || 0;
+// ---------------- 歌词持久化到 D1 ----------------
+// 为什么不再只靠 Cache API: 边缘缓存会被淘汰、有过期时间, 且分享页(无登录)也要读同一份歌词。
+// 写入语义见 migrations/2026-09-16-lyrics-store.sql:
+//   只有"真的取到歌词"(found=1)才落库, 长期有效 —— 只在"拉黑来源/撤销拉黑/改歌曲信息"时删除。
+//   "没找到"不入库: 边缘缓存的 MISS_TTL(6 小时)足够挡住重复上游请求, 也不会把"当时没找到"长期钉死。
+const DUR_TOLERANCE = 2;                   // 时长容忍: 库内时长与请求时长差 >2s 视为不是同一版本
 
-  // 1) 用户自己贴的歌词优先级最高, 直接返回(顺便拿到手填的 title/artist)
+const CREATE_SQL = `CREATE TABLE IF NOT EXISTS lyrics (
+  path       TEXT PRIMARY KEY,
+  found      INTEGER NOT NULL DEFAULT 0,
+  source     TEXT,
+  synced     TEXT,
+  plain      TEXT,
+  trans      TEXT,
+  roma       TEXT,
+  title      TEXT,
+  artist     TEXT,
+  duration   REAL NOT NULL DEFAULT 0,
+  fetched_at INTEGER NOT NULL
+)`;
+
+async function ensureStore(db) {
+  try { await db.prepare(CREATE_SQL).run(); } catch { /* 已存在 / 只读连接 */ }
+}
+
+// 读一条; 表不存在时自愈建表并当作未命中
+async function storeGet(db, path) {
+  try {
+    return await db.prepare(
+      'SELECT path, found, source, synced, plain, trans, roma, title, artist, duration, fetched_at FROM lyrics WHERE path = ?1',
+    ).bind(path).first() || null;
+  } catch (e) {
+    if (!/no such table/i.test(String(e && e.message))) return null;   // 读失败不影响播放
+    await ensureStore(db);
+    return null;
+  }
+}
+
+// 写一条。只写"取到歌词"的结果; 写失败只记日志, 不影响本次返回 —— 歌词是可选增强, 不能拖垮播放。
+async function storePut(db, path, result, meta) {
+  if (!result || !result.found) return;   // 空结果不落库(交给边缘缓存 6 小时)
+  const args = [
+    path,
+    1,
+    result.source || null,
+    result.synced || null,
+    result.plain || null,
+    result.trans || null,
+    result.roma || null,
+    (meta && meta.title) || null,
+    (meta && meta.artist) || null,
+    Number.isFinite(meta && meta.duration) ? meta.duration : 0,
+    Date.now(),
+  ];
+  const sql = `INSERT INTO lyrics (path, found, source, synced, plain, trans, roma, title, artist, duration, fetched_at)
+    VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+    ON CONFLICT(path) DO UPDATE SET
+      found = excluded.found, source = excluded.source, synced = excluded.synced, plain = excluded.plain,
+      trans = excluded.trans, roma = excluded.roma, title = excluded.title, artist = excluded.artist,
+      duration = excluded.duration, fetched_at = excluded.fetched_at`;
+  try {
+    await db.prepare(sql).bind(...args).run();
+  } catch (e) {
+    if (/no such table/i.test(String(e && e.message))) {
+      await ensureStore(db);
+      try { await db.prepare(sql).bind(...args).run(); return; } catch (e2) { console.error('lyrics store put:', e2 && e2.message); return; }
+    }
+    console.error('lyrics store put:', e && e.message);
+  }
+}
+
+// 删除(=失效)。拉黑来源、撤销拉黑、修改歌曲信息时调用; 也用于清理历史遗留的空结果行。
+export async function clearStoredLyrics(db, path) {
+  if (!path) return;
+  try { await db.prepare('DELETE FROM lyrics WHERE path = ?1').bind(path).run(); } catch { /* 表缺失无需处理 */ }
+}
+
+function rowToResult(row) {
+  return {
+    found: !!row.found,
+    synced: row.synced || null,
+    plain: row.plain || null,
+    trans: row.trans || null,
+    roma: row.roma || null,
+    source: row.source || null,
+    cached: true,
+  };
+}
+
+// D1 行是否可用于本次请求。只有 found=1 的行才算命中(found=0 是旧版本留下的, 视同无效)。
+function storeUsable(row, duration, rejected) {
+  if (!row || !row.found) return false;
+  if (row.source && rejected.indexOf(row.source) >= 0) return false;        // 该来源已被拉黑
+  const stored = Number(row.duration) || 0;
+  const asked = Number(duration) || 0;
+  // 库内没记时长(0)时不重取: 否则每首歌都要双次上游。时长对不上才判定为"另一个版本"
+  if (asked > 0 && stored > 0 && Math.abs(stored - asked) > DUR_TOLERANCE) return false;
+  return true;
+}
+
+// ---------------- 歌词解析主链路 (管理页 / 分享页共用) ----------------
+// 优先级: 用户手动贴的歌词 > D1 已存 > 边缘缓存 > 上游 > 写回(D1 + 边缘缓存)
+// 返回对象可能带 rejected / disabled / reason 等标记, 调用方原样透出。
+export async function resolveLyrics(env, db, opts) {
+  const path = opts.path;
+  const cfg = await lyricsConfigOf(env, db);
+  if (!cfg.enabled || cfg.provider === 'off') return { found: false, reason: 'disabled' };
+
+  const duration = Number(opts.duration) || 0;
+
+  // 1) 用户自己贴的歌词优先级最高(顺便拿到手填的 title/artist)
   let meta = null;
   try {
     meta = await db.prepare('SELECT title, artist, lrc, trans FROM track_meta WHERE path = ?1').bind(path).first();
   } catch { /* 未执行迁移时忽略, 回落到在线源 */ }
   if (meta && meta.lrc) {
-    return json({ found: true, synced: meta.lrc, plain: null, trans: meta.trans || null, roma: null, source: 'manual' });
+    return {
+      found: true, synced: meta.lrc, plain: null, trans: meta.trans || null, roma: null,
+      source: 'manual', title: meta.title || null, artist: meta.artist || null,
+    };
   }
 
   // 2) 曲名优先级: 请求参数覆盖 > 用户编辑的元数据 > 文件名解析
-  let title = (url.searchParams.get('title') || '').trim();
-  let artist = (url.searchParams.get('artist') || '').trim();
+  let title = String(opts.title || '').trim();
+  let artist = String(opts.artist || '').trim();
   if (!title && meta && meta.title) title = meta.title;
   if (!artist && meta && meta.artist) artist = meta.artist;
   if (!title) {
@@ -292,27 +404,38 @@ export async function getLyrics(_req, env, db, url) {
     title = p.title;
     if (!artist) artist = p.artist || '';
   }
-  if (!title) return jerr('无法从文件名解析出歌名, 请手动填写歌曲信息');
+  // 分享页拿不到曲名时不该报错 —— 只返回"没歌词", 页面照常播放
+  if (!title) return { found: false, reason: 'no-title' };
 
-  // 3) 拉黑检查: 该文件拉黑了哪些来源。链上全被拉黑 → 直接"暂无歌词"
+  // 3) 拉黑检查: 链上全被拉黑 → 直接"暂无歌词", 不读缓存不打上游
   const chain = chainOf(cfg);
   let rejected = [];
   try { rejected = await rejectsOf(db, path); } catch { /* 表缺失视为无 */ }
   const remaining = chain.filter((s) => rejected.indexOf(s) < 0);
-  if (!remaining.length) {
-    return json({ found: false, rejected: true, sources: rejected });
-  }
+  if (!remaining.length) return { found: false, rejected: true, sources: rejected };
 
-  // 4) 缓存键含曲名与取整后的时长: 任一变化都视为不同的查询。
-  //    有拉黑记录时跳过读 —— 缓存里可能还留着被拉黑源的旧结果
+  // 4) D1 命中(长期有效)
+  const row = await storeGet(db, path);
+  if (storeUsable(row, duration, rejected)) {
+    return { ...rowToResult(row), title, artist };
+  }
+  // 早期版本把"没找到"也写过库(found=0): 现在不再那样存, 顺手清掉, 免得多一次无效查询
+  if (row && !row.found) await clearStoredLyrics(db, path);
+
+  // 5) 边缘缓存(含拉黑记录时跳过读 —— 缓存里可能还留着被拉黑源的旧结果)
   const key = lyricsCacheKey(cfg, artist, title, duration);
   if (!rejected.length) {
     const cached = await cacheGet(key);
     if (cached) {
-      try { return jsonResponse(await cached.text()); } catch { /* 缓存体损坏则重查 */ }
+      try {
+        const parsed = JSON.parse(await cached.text());
+        await storePut(db, path, parsed, { title, artist, duration });   // 顺手补进 D1
+        return { ...parsed, title, artist };
+      } catch { /* 缓存体损坏则重查 */ }
     }
   }
 
+  // 6) 上游
   let result = EMPTY();
   if (remaining.indexOf('lrclib') >= 0) {
     result = await fromLrclib(artist, title, duration);
@@ -320,17 +443,54 @@ export async function getLyrics(_req, env, db, url) {
   if (!result.found && remaining.indexOf('lrc.cx') >= 0) {
     result = await fromLrcCx(artist, title);
   }
-
-  // 5) 译文: 只在取到原文后才去取, 省一次上游往返
   if (result.found && cfg.trans_provider === 'netease' && cfg.netease_base) {
     const t = await fromNetease(cfg.netease_base, artist, title, duration);
     if (t) { result.trans = t.trans; result.roma = t.roma; }
   }
 
-  const payload = JSON.stringify(result);
-  await cachePut(key, new Response(payload), result.found ? HIT_TTL : MISS_TTL);
-  return jsonResponse(payload);
+  // 7) 写回: 取到歌词才落 D1(长期); 边缘缓存无论空否都写(空结果 6 小时, 挡重复上游)
+  await storePut(db, path, result, { title, artist, duration });
+  await cachePut(key, new Response(JSON.stringify(result)), result.found ? HIT_TTL : MISS_TTL);
+  return { ...result, title, artist };
 }
+
+// ---------------- 主入口 ----------------
+// GET /api/lyrics?path=&duration=&title=&artist=
+export async function getLyrics(_req, env, db, url) {
+  const path = sanitizeRel(url.searchParams.get('path') || '');
+  if (!path) return jerr('缺少 path');
+  const r = await resolveLyrics(env, db, {
+    path,
+    duration: parseFloat(url.searchParams.get('duration') || '') || 0,
+    title: url.searchParams.get('title') || '',
+    artist: url.searchParams.get('artist') || '',
+  });
+  return json(r);
+}
+
+// 分享页(无需登录): 按分享目标文件解析歌词。
+// 与 /api/lyrics 同一套链路与数据 —— 手动歌词、D1 缓存、拉黑记录全部一致生效。
+export async function shareLyrics(_req, env, db, target, url) {
+  const r = await resolveLyrics(env, db, {
+    path: target.path,
+    duration: parseFloat(url.searchParams.get('duration') || '') || 0,
+    title: url.searchParams.get('title') || '',
+    artist: url.searchParams.get('artist') || '',
+  });
+  // 分享页不需要暴露"缺 path/未登录"这类内部原因, 统一降级为 found:false
+  const out = (r && (r.found || r.rejected)) ? r : { found: false };
+  return json({ ...out, name: target.name });
+}
+
+// 分享页封面: 与 /api/cover 同一套来源与缓存键(按曲名, 跨文件复用)
+export async function shareCover(_req, env, db, target, url) {
+  return resolveCover(env, db, {
+    path: target.path,
+    title: url.searchParams.get('title') || '',
+    artist: url.searchParams.get('artist') || '',
+  });
+}
+
 
 // ---------------- 歌词拉黑 ----------------
 // 有的源返回的歌词是错的。用户一键拉黑当前来源后:
@@ -387,6 +547,9 @@ export async function rejectLyrics(req, env, db) {
     'INSERT INTO lyrics_reject (path, sources, ts) VALUES (?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET sources = ?2, ts = ?3'
   ).bind(path, JSON.stringify(sources), Date.now()).run();
 
+  // D1 歌词一并失效: 库里可能存着刚被拉黑那个源的结果, 不清掉下次就直接端回来了
+  await clearStoredLyrics(db, path);
+
   // 拉黑即清缓存(用户会传 duration/title/artist 供定位键; 缺了就按文件名兜底解析)
   let title = String((body && body.title) || '').trim();
   let artist = String((body && body.artist) || '').trim();
@@ -406,6 +569,8 @@ export async function unRejectLyrics(req, env, db, url) {
   if (!path) return jerr('缺少 path');
   await ensureRejectTable(db);
   await db.prepare('DELETE FROM lyrics_reject WHERE path = ?1').bind(path).run();
+  // 撤销拉黑 = 允许重新联网获取: D1 里的空结果也要清掉, 否则 7 天窗口内一直不重试
+  await clearStoredLyrics(db, path);
   const cfg = await lyricsConfigOf(env, db);
   let title = (url.searchParams.get('title') || '').trim();
   let artist = (url.searchParams.get('artist') || '').trim();

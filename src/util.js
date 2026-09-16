@@ -114,6 +114,17 @@ export function splitPath(p) {
   return { parent: i === -1 ? '' : clean.slice(0, i), name: clean.slice(i + 1), path: clean };
 }
 
+// ---------------- 子树前缀匹配 (替代 LIKE 'path/%') ----------------
+// D1 的 LIKE pattern 有硬上限: 实测 pattern ≥ 49 字节即报
+//   "D1_ERROR: LIKE or GLOB pattern too complex: SQLITE_ERROR" (SQLITE_MAX_LIKE_PATTERN_LENGTH
+//  在 D1 侧被设成 50, 而非标准 SQLite 的 50000)。
+//   → 路径只要 ≥ 47 字节(≈16 个汉字) 的移动/复制/删除/图床反查全部 500。
+// 另外 LIKE 会把路径里的 '%' '_' 当通配符 (文件名合法字符), 语义也是错的。
+// 统一改成 substr 精确前缀匹配: <col> = ?1 OR substr(<col>, 1, length(?1)+1) = ?1 || '/'
+// 注意: SQLite 的 length()/substr() 按字符数而非字节数, 多字节路径自动对齐。
+export const subtreeMatch = (col, param = '?1') =>
+  `${col} = ${param} OR substr(${col}, 1, length(${param}) + 1) = ${param} || '/'`;
+
 // RFC5987 Content-Disposition 文件名编码
 export function encodeFilename(name) {
   let out = '';

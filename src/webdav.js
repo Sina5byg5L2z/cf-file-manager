@@ -4,7 +4,7 @@
 // 认证: Basic (用户名 + AUTH_PASSWORD / AUTH_PASSWORD_HASH)
 // ============================================================================
 
-import { sanitizeRel, mimeFromName } from './util.js';
+import { sanitizeRel, mimeFromName, subtreeMatch } from './util.js';
 import { getNode, serveFileContent, ensureDirs, moveNode, invalidateFileCache,
   ihRefs, ihRefsMessage, syncIhOnOverwrite } from './vfs.js';
 import { verifyCredentials } from './auth.js';
@@ -217,7 +217,7 @@ async function davDelete(db, env, clean) {
   }
   // I5: 元数据先删 (此后用户不可见), 再按归属库删字节; 失败只留孤儿, 由 journal 重试收敛
   const files = await collectFileRows(db, clean);
-  await db.prepare('DELETE FROM fs_nodes WHERE path = ?1 OR path LIKE ?1 || \'/%\'').bind(clean).run();
+  await db.prepare(`DELETE FROM fs_nodes WHERE ${subtreeMatch('path')}`).bind(clean).run();
   if (files.length) {
     await deleteBlobKeys(db, env, files);
     const per = new Map();
@@ -263,7 +263,7 @@ async function davMoveCopy(req, env, db, srcClean, isMove) {
     // COPY: 字节留在源文件各自的库 (同库 INSERT..SELECT, 字节不过 Worker 内存), 元数据最后写 (I5)
     const now = new Date().toISOString();
     if (src.is_dir) {
-      const sub = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE path = ?1 OR path LIKE ?1 || '/%'`).bind(srcClean).all();
+      const sub = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE ${subtreeMatch('path')}`).bind(srcClean).all();
       const off = srcClean.length;
       const stmts = [];
       const pairs = [];

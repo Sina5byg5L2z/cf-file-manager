@@ -10,6 +10,7 @@
 //   I5 删除: 元数据先删、字节后删 (失败只留孤儿); 改名: 字节先成、元数据后改
 // ============================================================================
 
+import { subtreeMatch } from './util.js';
 import { dbById } from './storage.js';
 
 // D1 单查询绑定参数上限 100; 每个路径贡献 2 个 key (f: / t:)
@@ -94,7 +95,7 @@ export async function journalRetry(mainDb, env, limit = 200) {
 // size 用于调用方按归属库做用量记帐
 export async function collectFileRows(mainDb, cleanPath) {
   const r = await mainDb.prepare(
-    "SELECT path, db_id, size FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || '/%') AND is_dir = 0",
+    `SELECT path, db_id, size FROM fs_nodes WHERE (${subtreeMatch('path')}) AND is_dir = 0`,
   ).bind(cleanPath).all();
   return r.results || [];
 }

@@ -11,7 +11,7 @@ import {
   CHUNK_SIZE, CACHE_MAX_FILE, deriveChunkSize, chunkCount, json, jerr, sanitizeRel, sanitizeFilename, splitPath,
   mimeFromName, fileExt, isTextName, isImageName, isVideoName, isPdfName,
   contentDisposition, encodeFilename, parseRange, cacheGet, cachePut, cacheDel,
-  blobStream, crcOfStream, zipStream, randomId,
+  blobStream, crcOfStream, zipStream, randomId, subtreeMatch,
 } from './util.js';
 import { validateToken } from './auth.js';
 import { rangeMaxOf } from './settings.js';
@@ -66,8 +66,9 @@ export async function invalidateFileCache(path, size) {
 export async function ihRefs(db, path) {
   const clean = sanitizeRel(path);
   if (!clean) return [];
+  // D1 的 LIKE pattern 上限 48 字节(见 util.js subtreeMatch 注释): 长路径必须用 substr 前缀匹配
   const r = await db.prepare(
-    "SELECT filename, original_name FROM image_host WHERE src_path = ?1 OR src_path LIKE ?1 || '/%'",
+    `SELECT filename, original_name FROM image_host WHERE ${subtreeMatch('src_path')}`,
   ).bind(clean).all();
   return r.results || [];
 }
@@ -86,11 +87,11 @@ export async function rekeyIhRefs(db, fromPath, toPath) {
   if (!from || from === to) return;
   const refs = await ihRefs(db, from);
   if (!refs.length) return;
-  // src_path 不含 'f:' 前缀 → 偏移 from.length + 1 (blobs 那边是 +3)
-  const off = from.length + 1;
+  // src_path 不含 'f:' 前缀 → 偏移 from.length + 1 (blobs 那边是 +3);
+  // 偏移在 SQL 里用 length() 算: SQLite 按字符, JS 的 .length 对 emoji 会多算。
   await db.prepare(
-    "UPDATE image_host SET src_path = ?2 || substr(src_path, ?3) WHERE src_path = ?1 OR src_path LIKE ?1 || '/%'",
-  ).bind(from, to, off).run();
+    `UPDATE image_host SET src_path = ?2 || substr(src_path, length(?1) + 1) WHERE ${subtreeMatch('src_path')}`,
+  ).bind(from, to).run();
   // 缓存里存着旧的 src_path 与旧的内容键
   await Promise.all(refs.map((r) => invalidateIhCache(r.filename)));
   // 图床列表 (IL:) 缓存里的 src_path 也过期了
@@ -172,7 +173,7 @@ export async function mkdir(req, env, db, url) {
 async function deleteSubtree(db, env, path) {
   const clean = sanitizeRel(path);
   const files = await collectFileRows(db, clean);
-  await db.prepare('DELETE FROM fs_nodes WHERE path = ?1 OR path LIKE ?1 || \'/%\'').bind(clean).run();
+  await db.prepare(`DELETE FROM fs_nodes WHERE ${subtreeMatch('path')}`).bind(clean).run();
   if (!files.length) return;
   await deleteBlobKeys(db, env, files);
   // 用量记帐: 按归属库分别扣减
@@ -235,15 +236,16 @@ export async function moveNode(db, env, fromPath, toDir, newName) {
   if (node.is_dir && (sp.path === from || sp.path.startsWith(from + '/'))) return { error: '不能移动到自身内部', status: 400 };
   if (await getNode(db, sp.path)) return { error: '目标已存在', status: 409 };
 
-  const offN = from.length + 1; // fs_nodes: 剥离 'from' 前缀
-  const offB = from.length + 3; // blobs: 剥离 'f:' + 'from' 前缀
+  // offN/offB 一律在 SQL 里用 length(): SQLite 按字符计数, JS 的 .length 对 emoji(surrogate pair)
+  // 会计成 2 —— 用错会把名字切坏。
+  const SUBTREE = subtreeMatch('path');
   const now = new Date().toISOString();
   const fsStmt = node.is_dir
-    ? db.prepare('UPDATE fs_nodes SET path = ?2 || substr(path, ?3), parent = CASE WHEN path = ?1 THEN ?4 ELSE ?2 || substr(parent, ?3) END, modified_at = ?5 WHERE path = ?1 OR path LIKE ?1 || \'/%\'').bind(from, sp.path, offN, sp.parent, now)
+    ? db.prepare(`UPDATE fs_nodes SET path = ?2 || substr(path, length(?1) + 1), parent = CASE WHEN path = ?1 THEN ?3 ELSE ?2 || substr(parent, length(?1) + 1) END, modified_at = ?4 WHERE ${SUBTREE}`).bind(from, sp.path, sp.parent, now)
     : db.prepare('UPDATE fs_nodes SET path = ?2, parent = ?3, name = ?4, modified_at = ?5 WHERE path = ?1').bind(from, sp.path, sp.parent, name, now);
 
   // 受影响的文件行与其归属库 (分库后字节可能不在主库)
-  const fr = await db.prepare("SELECT path, db_id FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || '/%') AND is_dir = 0").bind(from).all();
+  const fr = await db.prepare(`SELECT path, db_id FROM fs_nodes WHERE (${SUBTREE}) AND is_dir = 0`).bind(from).all();
   const files = fr.results || [];
   const dbIds = new Set(files.map((r) => r.db_id || 1));
 
@@ -252,8 +254,8 @@ export async function moveNode(db, env, fromPath, toDir, newName) {
     // blobs 与元数据放进同一个 batch, 单库事务, 要么全成要么全败
     const bStmts = node.is_dir
       ? [
-          db.prepare('UPDATE blobs SET key = \'f:\' || ?2 || substr(key, ?3) WHERE key IN (SELECT \'f:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(from, sp.path, offB),
-          db.prepare('UPDATE blobs SET key = \'t:\' || ?2 || substr(key, ?3) WHERE key IN (SELECT \'t:\' || path FROM fs_nodes WHERE (path = ?1 OR path LIKE ?1 || \'/%\') AND is_dir = 0)').bind(from, sp.path, offB),
+          db.prepare(`UPDATE blobs SET key = 'f:' || ?2 || substr(key, length(?1) + 3) WHERE key IN (SELECT 'f:' || path FROM fs_nodes WHERE (${SUBTREE}) AND is_dir = 0)`).bind(from, sp.path),
+          db.prepare(`UPDATE blobs SET key = 't:' || ?2 || substr(key, length(?1) + 3) WHERE key IN (SELECT 't:' || path FROM fs_nodes WHERE (${SUBTREE}) AND is_dir = 0)`).bind(from, sp.path),
         ]
       : [
           db.prepare('UPDATE blobs SET key = ?2 WHERE key = ?1').bind('f:' + from, 'f:' + sp.path),
@@ -314,7 +316,7 @@ export async function copyFile(req, env, db) {
   if (node.is_dir) {
     // 复制整棵子树: 先搬字节(留在源文件各自的库, 同库 INSERT..SELECT 零成本), 再写元数据行。
     // 顺序遵循 I5 (字节先落、元数据后写): 中途失败只会留下孤儿字节, 不会出现"有记录没数据"。
-    const sub = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE path = ?1 OR path LIKE ?1 || '/%'`).bind(from).all();
+    const sub = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE ${subtreeMatch('path')}`).bind(from).all();
     const rows = sub.results || [];
     const off = from.length;
     const stmts = [];
@@ -889,10 +891,11 @@ export async function uploadThumbnail(req, env, db) {
 export async function searchFiles(req, env, db, url) {
   const q = (url.searchParams.get('q') || '').toLowerCase();
   if (!q) return json({ query: q, results: [] });
-  const pattern = '%' + q.replace(/([%_\\])/g, '\\$1') + '%';
+  // 不用 LIKE: D1 的 pattern 上限 48 字节(见 util.js subtreeMatch), 长关键词会直接 500;
+  // instr + lower 等价原来的 '%q%' 语义, 还省掉转义。
   const res = await db.prepare(
-    "SELECT path, name, is_dir, size FROM fs_nodes WHERE name LIKE ?1 ESCAPE '\\' LIMIT 200",
-  ).bind(pattern).all();
+    'SELECT path, name, is_dir, size FROM fs_nodes WHERE instr(lower(name), lower(?1)) > 0 LIMIT 200',
+  ).bind(q).all();
   const results = (res.results || []).map((r) => ({
     name: r.name,
     path: r.path,

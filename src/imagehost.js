@@ -173,8 +173,9 @@ export async function list(req, env, db, url) {
   if (hit) return hit;
 
   const offset = (page - 1) * pageSize;
-  const where = search ? 'WHERE original_name LIKE ?1' : '';
-  const binds = search ? [`%${search.replace(/([%_\\])/g, '\\$1')}%`] : [];
+  // LIKE 的 pattern 在 D1 里上限 48 字节(见 util.js subtreeMatch), 长搜索词会 500 → 用 instr 子串
+  const where = search ? 'WHERE instr(lower(original_name), lower(?1)) > 0' : '';
+  const binds = search ? [search] : [];
   const totalRow = await db.prepare(`SELECT COUNT(*) AS c FROM image_host ${where}`).bind(...binds).first();
   const rows = await db.prepare(
     `SELECT filename, original_name, mime_type, size, upload_time, src_path, db_id FROM image_host ${where} ORDER BY upload_time DESC LIMIT ?${search ? 2 : 1} OFFSET ?${search ? 3 : 2}`,

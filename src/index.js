@@ -70,7 +70,8 @@ async function route(request, env, ctx) {
     const url2 = new URL(request.url);
     // inline = 页内预览通道 (图片/视频/PDF 等), 必须回 inline 型 Content-Disposition,
     // 与 download 的 attachment 区分开; 缺了它请求会被当成纯页面返回 share.html
-    const actionable = ['data', 'download', 'inline', 'thumb', 'sub_path', 'quality', 'prepare', 'qualities']
+    // lyrics/cover = 分享页播放器的歌词与封面接口 (无需登录, 但沿用分享链接的鉴权与密码)
+    const actionable = ['data', 'download', 'inline', 'thumb', 'sub_path', 'quality', 'prepare', 'qualities', 'lyrics', 'cover']
       .some((k) => url2.searchParams.has(k));
     if (!actionable) return assets(request, env, '/share.html');
     return share.accessShare(request, env, db, shareMatch[1], url2);
