@@ -45,6 +45,7 @@
         lyricFont: 15,   // 歌词字号(px), T+/T- 调整, localStorage 持久化
     };
     var booted = false;
+    var playSeq = 0;   // 播放代次: 切歌/清空队列时 +1, 异步回调据此丢弃过期结果
 
     // ---------------- 工具 ----------------
     function q(sel, root) { return (root || document).querySelector(sel); }
@@ -126,7 +127,9 @@
             '    </div>',
             '  </div>',
             '</div>',
-            '<div class="mp-panel" id="mpQueue" style="display:none"><div class="mp-panel-head">播放队列</div><div class="mp-panel-list" id="mpQueueList"></div></div>',
+            '<div class="mp-panel" id="mpQueue" style="display:none"><div class="mp-panel-head"><span>播放队列</span>'
+            + '<button class="mp-btn mp-clear" data-act="clear" title="清空播放队列并关闭播放器">清空</button></div>'
+            + '<div class="mp-panel-list" id="mpQueueList"></div></div>',
             '<div class="mp-panel mp-info" id="mpInfo" style="display:none">',
             '  <div class="mp-panel-head">歌曲信息</div>',
             '  <div class="mp-panel-body">',
@@ -200,6 +203,7 @@
             else if (act === 'mode') cycleMode();
             else if (act === 'rate') cycleRate();
             else if (act === 'queue') togglePanel('queue');
+            else if (act === 'clear') clearQueue();
             else if (act === 'expand') openFull();
             else if (act === 'collapse') closeFull();
             else if (act === 'info') openInfo();
@@ -261,7 +265,6 @@
         if (i < 0 || i >= state.queue.length) return;
         state.index = i;
         var item = state.queue[i];
-        state.current = null;
         state.lines = [];
         state.lyricIndex = -2;
         el.lyrics.innerHTML = '<div class="mp-lyric-empty">加载中…</div>';
@@ -270,9 +273,10 @@
         audio.src = global.API.previewUrl(item.path);
         audio.play().catch(function () { /* 自动播放被拦截时等用户点 */ });
 
+        var seq = ++playSeq;                              // 切歌/清空都会 +1, 过期回调直接丢弃
         (global.TrackMeta ? global.TrackMeta.resolve({ path: item.path, name: item.name }) : Promise.resolve(null))
             .then(function (meta) {
-                if (!meta || state.index !== i) return;      // 已经切歌了就丢弃
+                if (!meta || state.index !== i || seq !== playSeq) return;
                 state.current = meta;
                 item.title = meta.title;
                 item.artist = meta.artist;
@@ -637,6 +641,27 @@
         loadLyrics(true);
     }
 
+    // ---------------- 清空播放队列 ----------------
+    // 队列在内存里(没有持久化), 清空 = 停播 + 收起底栏/歌词页/面板, 回到进入播放器之前的状态
+    function clearQueue() {
+        state.queue = [];
+        state.index = -1;
+        state.current = null;
+        state.lines = [];
+        state.lyricIndex = -2;
+        playSeq++;                  // 让在途的元数据/歌词回调失效
+        try { audio.pause(); } catch (e) {}
+        try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
+        el.lyrics.innerHTML = '';
+        if (el.queue) el.queue.style.display = 'none';
+        if (el.info) el.info.style.display = 'none';
+        closeFull();
+        renderBar();                // queue 为空 → 底栏自动 display:none
+        if ('mediaSession' in navigator) {
+            try { navigator.mediaSession.metadata = null; } catch (e) {}
+        }
+    }
+
     // ---------------- Media Session ----------------
     function updateMediaSession() {
         if (!('mediaSession' in navigator) || !state.current) return;
@@ -704,7 +729,9 @@
         open: open,
         playAll: playAll,
         isAudio: isAudioEntry,
+        clear: clearQueue,
         current: function () { return state.current; },
+        queue: function () { return state.queue.slice(); },
         audio: function () { return audio; },
     };
 })(window);

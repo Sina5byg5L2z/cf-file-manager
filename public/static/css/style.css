@@ -675,7 +675,9 @@ body.has-upload-launcher .upload-progress{bottom:80px}
 .mp-ofs-gap { flex: 1 1 12px; }
 
 .mp-panel { position: fixed; right: 20px; bottom: 70px; z-index: 1170; width: 340px; max-height: 60vh; overflow-y: auto; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
-.mp-panel-head { padding: 12px 16px; font-size: 13px; font-weight: 500; color: var(--text-primary); border-bottom: 1px solid var(--border); }
+.mp-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; font-size: 13px; font-weight: 500; color: var(--text-primary); border-bottom: 1px solid var(--border); }
+.mp-clear { flex: none; padding: 2px 10px; font-size: 12px; color: var(--color-error); border-color: var(--color-error); }
+.mp-clear:hover { background: rgba(248,81,73,0.15); }
 .mp-panel-list { padding: 6px; }
 .mp-qitem { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
 .mp-qitem:hover { background: var(--hover-bg); }

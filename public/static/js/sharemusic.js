@@ -152,7 +152,9 @@
             '    </div>',
             '  </div>',
             '</div>',
-            '<div class="mp-panel" id="smQueue" style="display:none"><div class="mp-panel-head">播放列表</div><div class="mp-panel-list" id="smQueueList"></div></div>',
+            '<div class="mp-panel" id="smQueue" style="display:none"><div class="mp-panel-head"><span>播放列表</span>'
+            + '<button class="mp-btn mp-clear" data-act="clear" title="清空播放列表并关闭播放器">清空</button></div>'
+            + '<div class="mp-panel-list" id="smQueueList"></div></div>',
         ].join('');
         while (wrap.firstChild) document.body.appendChild(wrap.firstChild);
 
@@ -341,6 +343,26 @@
         if (on) renderQueue();
     }
 
+    // 清空播放列表: 停止播放并彻底收起播放器(底栏/歌词页/列表都消失, 回到分享页原样)
+    function clearQueue() {
+        state.gen++;                 // 让在途的歌词/封面回调失效
+        state.queue = [];
+        state.index = -1;
+        state.cur = null;
+        state.lines = [];
+        state.timed = true;
+        state.lyricIndex = -2;
+        try { audio.pause(); } catch (e) {}
+        try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
+        el.cover.style.backgroundImage = '';
+        el.bigcover.style.backgroundImage = '';
+        el.lyrics.innerHTML = '';
+        toggleQueue(false);
+        openFull(false);
+        showBar(false);
+        renderPlayIcons();
+    }
+
     function applyFont(px) {
         fonts = Math.min(30, Math.max(11, px));
         el.lyrics.style.fontSize = fonts + 'px';
@@ -445,7 +467,9 @@
     function bindActs() {
         document.addEventListener('click', function (e) {
             var btn = e.target && e.target.closest ? e.target.closest('[data-act]') : null;
-            var inPlayer = btn && ((el.bar && el.bar.contains(btn)) || (el.full && el.full.contains(btn)));
+            // 播放列表面板也是播放器的一部分(它挂在 body 上, 不在底栏/歌词页里)
+            var inPlayer = btn && ((el.bar && el.bar.contains(btn)) || (el.full && el.full.contains(btn))
+                || (el.qpanel && el.qpanel.contains(btn)));
             var act = inPlayer ? btn.getAttribute('data-act') : null;
             // 点播放列表/底栏之外的地方 → 收起播放列表
             if (el.qpanel.style.display !== 'none' && act !== 'queue' && !el.qpanel.contains(e.target)) toggleQueue(false);
@@ -456,6 +480,7 @@
             else if (act === 'expand') openFull(true);
             else if (act === 'collapse') openFull(false);
             else if (act === 'queue') toggleQueue(el.qpanel.style.display === 'none');
+            else if (act === 'clear') clearQueue();
             else if (act === 'font-') applyFont(fonts - 1);
             else if (act === 'font+') applyFont(fonts + 1);
             else if (act === 'ofs-') adjustOffset(-500);
@@ -526,6 +551,7 @@
         toggle: togglePlay,
         step: step,
         openFull: openFull,
+        clear: clearQueue,
         isAudioEntry: isAudioEntry,
         // 目录 entries → 播放队列 [{ name, subPath }]
         audioList: function (entries, subPath) {
@@ -536,5 +562,8 @@
             return out;
         },
         state: state,
+        audio: function () { return audio; },
+        // 仅供测试探针: 播放器内部函数不对外暴露
+        _t: { clearQueue: clearQueue, playAt: playAt, renderQueue: renderQueue, showBar: showBar },
     };
 })(window);
