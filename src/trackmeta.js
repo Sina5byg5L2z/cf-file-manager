@@ -11,7 +11,7 @@
 // 自动回落到内嵌标签/文件名解析, 旧行留着无害(不参与任何查询)。
 // ============================================================================
 import { json, jerr, sanitizeRel } from './util.js';
-import { clearStoredLyrics } from './lyrics.js';
+import { clearStoredLyrics, clearLyricsCache } from './lyrics.js';
 
 const MAX_FIELD = 400;        // title/artist/album 最大长度
 const MAX_LRC = 300 * 1024;   // 单段歌词文本上限 300KB
@@ -82,7 +82,7 @@ export async function getMeta(_req, _env, db, url) {
 }
 
 // PUT /api/track/meta — 整体覆盖(前端始终提交完整对象, null 表示清空该字段)
-export async function putMeta(req, _env, db) {
+export async function putMeta(req, env, db) {
   let body;
   try { body = await req.json(); } catch { return jerr('请求格式错误'); }
   const path = sanitizeRel(body && body.path);
@@ -97,6 +97,13 @@ export async function putMeta(req, _env, db) {
   // source 只用于 UI 展示来源标记, 不参与优先级判定
   const source = ['manual', 'id3', 'filename'].includes(body.source) ? body.source : 'manual';
   const now = Date.now();
+
+  // 改之前先把旧标题/歌手读出来 —— 边缘缓存键是按 (provider, artist, title, duration) 拼的,
+  // 只清新键会漏掉旧键, 那份旧歌词会继续 HIT 30 天。读取失败不影响保存。
+  let old = null;
+  try {
+    old = await db.prepare('SELECT title, artist FROM track_meta WHERE path = ?1').bind(path).first();
+  } catch { /* 表缺失: 说明是首次写入, 没有旧缓存要清 */ }
 
   try {
     await db.prepare(
@@ -119,6 +126,14 @@ export async function putMeta(req, _env, db) {
   // 歌曲信息一改, 之前按旧标题/歌手存到 D1 的歌词就不一定还是这首歌了 → 失效重取。
   // (手动贴的歌词存在 track_meta 里, 优先级更高, 不受这里影响)
   await clearStoredLyrics(db, path);
+  // 边缘缓存同样要清: 它有 30 天 HIT, 且键里带旧标题/歌手。
+  // 不清的话会出现"用户填了译文/改了歌名, 界面还是旧歌词" —— 尤其用户是在
+  // 联网结果已经缓存之后才补填译文的, 那份不含译文的旧结果会被一直端回来。
+  try {
+    await clearLyricsCache(env, db, {
+      title, artist, oldTitle: old && old.title, oldArtist: old && old.artist,
+    });
+  } catch { /* 缓存清理失败不该阻断保存 */ }
 
   return json({ meta: { path, title, artist, album, lyric_offset: offset, lrc, trans, source, updated_at: now } });
 }

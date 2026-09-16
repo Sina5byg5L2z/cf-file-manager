@@ -253,7 +253,8 @@
                     state.timed = false;
                 }
             } else if (d.found && d.trans && L) {
-                // 分享者只填了译文(原文留空): 以译文为骨架, 否则界面会没有任何歌词
+                // 手填了译文但联网没拿到原文(源头没这首歌/全被拉黑): 以译文为骨架,
+                // 否则界面会没有任何歌词。有原文时走上面分支, 译文是叠加在原文上的, 不会吃掉原文。
                 state.lines = L.transOnly ? L.transOnly(d.trans) : [];
                 state.timed = state.lines.length ? state.lines[0].time >= 0 : true;
             } else if (d.found && d.plain) {

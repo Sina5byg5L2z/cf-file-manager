@@ -372,8 +372,28 @@ function storeUsable(row, duration, rejected) {
   return true;
 }
 
+// 把"手填译文"作为覆盖层叠到联网/D1/缓存的结果上。
+// 语义要点(2026-09-16 定稿, 别再改错):
+//   手填原文 → 整体接管(在 resolveLyrics 开头就 return, 不经过这里);
+//   手填译文 → 只覆盖 trans 字段, **绝不动 synced** —— 联网拿到的原文要原样保留。
+//     用户抱怨过的原话: "我贴了翻译为什么要把从网络获取的原文给我删掉"。
+//   即使联网一无所获(found=false), 手填译文也要让结果变成 found=true 并把译文返回 ——
+//   否则用户填了译文却什么都看不到, 这正是本函数存在的第二层意义。
+function applyManualTrans(result, manualTrans, tip) {
+  if (!manualTrans) return result;
+  return {
+    ...result,
+    trans: manualTrans,
+    source: 'manual',
+    found: true,
+    reason: undefined,
+    ...tip,
+  };
+}
+
 // ---------------- 歌词解析主链路 (管理页 / 分享页共用) ----------------
-// 优先级: 用户手动贴的歌词 > D1 已存 > 边缘缓存 > 上游 > 写回(D1 + 边缘缓存)
+// 优先级: 用户手动贴的原文 > D1 已存 > 边缘缓存 > 上游 > 写回(D1 + 边缘缓存)
+// 手填译文不参与"哪个来源命中"的判定, 它只是最后叠上去的一层。
 // 返回对象可能带 rejected / disabled / reason 等标记, 调用方原样透出。
 export async function resolveLyrics(env, db, opts) {
   const path = opts.path;
@@ -382,45 +402,61 @@ export async function resolveLyrics(env, db, opts) {
 
   const duration = Number(opts.duration) || 0;
 
-  // 1) 用户自己贴的歌词优先级最高(顺便拿到手填的 title/artist)
-  //    注意: 原文与译文任一非空即视为"用户手动提供" —— 只贴译文时原文框是空的,
-  //    旧写法只看 meta.lrc 会把手填的译文整份丢掉, 还白打一次上游。
+  // 1) 用户自己贴的原文优先级最高(顺便拿到手填的 title/artist)
+  //    manualLrc 是"整体接管": 用户贴了原文就不再联网。
+  //    manualTrans 只是"译文覆盖层": 只填译文时原文仍要照常联网取, 最后用译文覆盖 ——
+  //    绝不能因为填了译文就把联网拿到的原文丢掉(用户只想要译文补充, 不是想删掉原文)。
   let meta = null;
   try {
     meta = await db.prepare('SELECT title, artist, lrc, trans FROM track_meta WHERE path = ?1').bind(path).first();
   } catch { /* 未执行迁移时忽略, 回落到在线源 */ }
-  if (meta && (meta.lrc || meta.trans)) {
+  const manualLrc = (meta && meta.lrc) ? meta.lrc : null;
+  const manualTrans = (meta && meta.trans) ? meta.trans : null;
+  const manualTitle = (meta && meta.title) || null;
+  const manualArtist = (meta && meta.artist) || null;
+  if (manualLrc) {
     return {
-      found: true, synced: meta.lrc || null, plain: null,
-      trans: meta.trans || null, roma: null,
-      source: 'manual', title: meta.title || null, artist: meta.artist || null,
+      found: true, synced: manualLrc, plain: null,
+      trans: manualTrans, roma: null,
+      source: 'manual', title: manualTitle, artist: manualArtist,
     };
   }
+  const tip = { title: manualTitle, artist: manualArtist };
 
   // 2) 曲名优先级: 请求参数覆盖 > 用户编辑的元数据 > 文件名解析
   let title = String(opts.title || '').trim();
   let artist = String(opts.artist || '').trim();
-  if (!title && meta && meta.title) title = meta.title;
-  if (!artist && meta && meta.artist) artist = meta.artist;
+  if (!title && manualTitle) title = manualTitle;
+  if (!artist && manualArtist) artist = manualArtist;
   if (!title) {
     const p = parseName(basename(path));
     title = p.title;
     if (!artist) artist = p.artist || '';
   }
   // 分享页拿不到曲名时不该报错 —— 只返回"没歌词", 页面照常播放
-  if (!title) return { found: false, reason: 'no-title' };
+  // (但只要用户手填了译文, 就该把译文给他, 而不是因为取不到曲名就返回空)
+  if (!title) {
+    if (manualTrans) return applyManualTrans(EMPTY(), manualTrans, { title: null, artist: null });
+    return { found: false, reason: 'no-title' };
+  }
+  tip.title = title;
+  tip.artist = artist;
 
   // 3) 拉黑检查: 链上全被拉黑 → 直接"暂无歌词", 不读缓存不打上游
   const chain = chainOf(cfg);
   let rejected = [];
   try { rejected = await rejectsOf(db, path); } catch { /* 表缺失视为无 */ }
   const remaining = chain.filter((s) => rejected.indexOf(s) < 0);
-  if (!remaining.length) return { found: false, rejected: true, sources: rejected };
+  if (!remaining.length) {
+    // 全拉黑了: 没有联网原文可用, 但手填的译文仍然有效
+    if (manualTrans) return applyManualTrans(EMPTY(), manualTrans, tip);
+    return { found: false, rejected: true, sources: rejected };
+  }
 
   // 4) D1 命中(长期有效)
   const row = await storeGet(db, path);
   if (storeUsable(row, duration, rejected)) {
-    return { ...rowToResult(row), title, artist };
+    return applyManualTrans({ ...rowToResult(row), title, artist }, manualTrans, tip);
   }
   // 早期版本把"没找到"也写过库(found=0): 现在不再那样存, 顺手清掉, 免得多一次无效查询
   if (row && !row.found) await clearStoredLyrics(db, path);
@@ -433,7 +469,7 @@ export async function resolveLyrics(env, db, opts) {
       try {
         const parsed = JSON.parse(await cached.text());
         await storePut(db, path, parsed, { title, artist, duration });   // 顺手补进 D1
-        return { ...parsed, title, artist };
+        return applyManualTrans({ ...parsed, title, artist }, manualTrans, tip);
       } catch { /* 缓存体损坏则重查 */ }
     }
   }
@@ -452,9 +488,11 @@ export async function resolveLyrics(env, db, opts) {
   }
 
   // 7) 写回: 取到歌词才落 D1(长期); 边缘缓存无论空否都写(空结果 6 小时, 挡重复上游)
+  //    注意: 用户手填的译文是"覆盖层", 不写进 D1/边缘缓存(那是联网结果的缓存),
+  //    只在返回时叠加 —— 否则用户清空译文后缓存还会把旧译文端回来。
   await storePut(db, path, result, { title, artist, duration });
   await cachePut(key, new Response(JSON.stringify(result)), result.found ? HIT_TTL : MISS_TTL);
-  return { ...result, title, artist };
+  return applyManualTrans({ ...result, title, artist }, manualTrans, tip);
 }
 
 // ---------------- 主入口 ----------------
@@ -523,6 +561,30 @@ async function rejectsOf(db, path) {
 // 缓存键与 getLyrics 完全一致 —— 拉黑/撤销时清掉, 否则 30 天 HIT 会把错误歌词又端回来
 function lyricsCacheKey(cfg, artist, title, duration) {
   return `lyrics:${cfg.provider}:${(artist || '').toLowerCase()}:${title.toLowerCase()}:${Math.round(duration || 0)}`;
+}
+
+// 清掉"这首歌"的边缘缓存(供 trackmeta 在歌曲信息变更后调用)。
+// 为什么必须清: 边缘缓存是 30 天 HIT。用户改完歌名/歌手后, 旧键上的结果就未必还是这首歌;
+// 更关键的是——用户"手填译文之前"可能已经缓存过一份不含译文的结果, 不清就会一直被端回来,
+// 表现为"我明明填了译文, 界面还是旧歌词"。
+// 键的形状是 lyrics:<provider>:<artist>:<title>:<duration>, provider 只有几个取值、
+// duration 取请求值与 0 两档, 组合很小, 逐个删即可。
+export async function clearLyricsCache(env, db, hints) {
+  const cfg = await lyricsConfigOf(env, db);
+  const h = hints || {};
+  const titles = [h.title, h.oldTitle].filter(Boolean);
+  const artists = [h.artist, h.oldArtist].filter((x) => x !== undefined);
+  if (!titles.length && !artists.length) return;
+  const providers = new Set([cfg.provider, 'auto', 'lrclib', 'lrc_cx']);
+  for (const p of providers) {
+    for (const title of (titles.length ? titles : [''])) {
+      for (const artist of (artists.length ? artists : [''])) {
+        for (const dur of [Number(h.duration) || 0, 0]) {
+          await cacheDel(lyricsCacheKey({ provider: p }, artist, title, dur));
+        }
+      }
+    }
+  }
 }
 
 // POST /api/lyrics/reject  body: { path, source?, all?, duration?, title?, artist? }

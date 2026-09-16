@@ -390,20 +390,31 @@
     function loadLyrics(force) {
         if (!state.current) return;
         var c = state.current;
-        // 1) 用户粘贴 / 内嵌歌词 —— 不用联网
-        //    原文与译文任一有内容就走本地: 用户只贴译文时原文是空的, 旧写法只认 synced
-        //    会把译文丢掉还白打一次上游。带时间轴的原文优先, 退而用纯译文。
+        // 1) 用户自己贴的原文 —— 整体接管, 不用联网
+        //    只有"带时间轴的原文"才短路: 用户手填的原文就该原样显示, 联网只会覆盖掉它。
+        //    注意这里**不能**把译文也算进短路条件 —— 用户只贴译文时原文是空的,
+        //    若就此返回, 联网本该拿到的原文就永远没了(用户要的是"补译文", 不是"删原文")。
+        //    只填译文的情形继续往下走, 由服务端把译文叠加到联网原文上返回。
         var synced = c.lrc || c.embeddedLrc;
         var hasOrig = synced && global.Lyrics.hasTimestamps(synced);
-        var hasTrans = c.trans && String(c.trans).trim();
-        if (hasOrig || hasTrans) {
-            applyLyric(hasOrig ? synced : null, c.trans, null, c.lrc ? 'manual' : (hasOrig ? 'id3' : 'manual'));
+        if (hasOrig) {
+            applyLyric(synced, c.trans, null, c.lrc ? 'manual' : 'id3');
             return;
         }
-        if (!global.API) return;
+        if (!global.API) {
+            // 没有 API 就用不了联网原文; 此时手填译文聊胜于无, 单独铺开显示
+            if (c.trans) applyLyric(null, c.trans, null, 'manual');
+            return;
+        }
         var key = lyricKey();
         var TM = global.TrackMeta;
         var dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+        // 用户手填的译文是"覆盖层": 服务端已会在返回里叠加, 但缓存命中的响应可能是
+        // 用户填译文之前的旧结果 —— 本地再兜一次, 保证译文一定显示出来。
+        var applyRemote = function (synced, trans, roma, source) {
+            applyLyric(synced, (c.trans && String(c.trans).trim()) ? c.trans : trans, roma,
+                c.trans ? 'manual' : source);
+        };
         var fetchRemote = function () {
             return global.API.lyrics(c.path, {
                 duration: dur,
@@ -417,14 +428,19 @@
                     return;
                 }
                 if (TM) TM.cache.put(key, { synced: r.synced, trans: r.trans, roma: r.roma, source: r.source, ts: Date.now() });
-                applyLyric(r.synced, r.trans || c.trans, r.roma, r.source);
+                applyRemote(r.synced, r.trans, r.roma, r.source);
             }).catch(function () { applyLyric(null, null, null, 'none'); });
         };
         if (!TM) { fetchRemote(); return; }
         TM.cache.get(key).then(function (hit) {
-            if (hit && !force) { applyLyric(hit.synced, hit.trans, hit.roma, hit.source || 'cache'); return; }
+            if (hit && !force) { applyRemote(hit.synced, hit.trans, hit.roma, hit.source || 'cache'); return; }
             return TM.cache.negative(key).then(function (neg) {
-                if (neg && !force && Date.now() - neg < TM.LOCAL_TTL) { applyLyric(null, null, null, 'none'); return; }
+                if (neg && !force && Date.now() - neg < TM.LOCAL_TTL) {
+                    // 本地"确认没歌词"的负缓存: 但用户手填了译文, 就该把译文显示出来
+                    if (c.trans) applyLyric(null, c.trans, null, 'manual');
+                    else applyLyric(null, null, null, 'none');
+                    return;
+                }
                 return fetchRemote();
             });
         });
