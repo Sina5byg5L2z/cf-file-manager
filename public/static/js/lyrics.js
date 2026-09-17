@@ -132,6 +132,17 @@
         return h > 0 ? h + ':' + mm + ':' + ss : mm + ':' + ss;
     }
 
+    // 「复制歌词」附带的翻译指令: 要求模型输出仍带原时间戳的完整 LRC,
+    // 粘回「译文」框后 parse+timeMap+nearest 才能逐行对上(见 merge)。
+    var COPY_PROMPT = [
+        '请把下面的 LRC 歌词逐行翻译成中文。严格要求：',
+        '1. 每行开头的时间戳原样保留，一行都不能增、删、改；',
+        '2. 只把时间戳后面的歌词正文翻译成中文，输出的行数必须与原文完全相同；',
+        '3. [ar:][ti:][al:] 等元信息行原样保留，不要翻译；',
+        '4. 直接输出完整的带时间戳译文，不要任何解释，不要用代码块包起来。',
+        ''
+    ].join('\n');
+
     global.Lyrics = {
         parse: parse,
         merge: merge,
@@ -139,5 +150,6 @@
         indexAt: indexAt,
         formatTime: formatTime,
         hasTimestamps: function (t) { return new RegExp(TS_RE).test(String(t || '')); },
+        copyPrompt: COPY_PROMPT,
     };
 })(window);

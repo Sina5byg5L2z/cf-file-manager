@@ -415,10 +415,15 @@ export async function resolveLyrics(env, db, opts) {
   const manualTitle = (meta && meta.title) || null;
   const manualArtist = (meta && meta.artist) || null;
   if (manualLrc) {
+    // 整体接管: 不联网。但**仍要把拉黑记录带出去** —— 否则用户在"手填了原文"的曲子上
+    // 拉黑过某个源之后, 前端拿不到 sources, "取消拉黑"按钮就永远不会出现, 撤销入口丢失。
+    let rej = [];
+    try { rej = await rejectsOf(db, path); } catch { /* 表缺失视为无 */ }
     return {
       found: true, synced: manualLrc, plain: null,
       trans: manualTrans, roma: null,
       source: 'manual', title: manualTitle, artist: manualArtist,
+      ...(rej.length ? { rejected: true, sources: rej } : {}),
     };
   }
   const tip = { title: manualTitle, artist: manualArtist };
@@ -628,15 +633,46 @@ export async function rejectLyrics(req, env, db) {
   return json({ ok: true, sources });
 }
 
-// DELETE /api/lyrics/reject?path=  → 撤销拉黑(恢复联网获取)
+// GET /api/lyrics/reject?path=  → 查该文件当前的拉黑记录
+// 供「取消拉黑」列出可撤销的来源: 部分拉黑时界面此前没有任何入口能撤销。
+export async function listRejects(_req, _env, db, url) {
+  const path = sanitizeRel(url.searchParams.get('path') || '');
+  if (!path) return jerr('缺少 path');
+  const sources = await rejectsOf(db, path);
+  return json({ ok: true, sources });
+}
+
+// DELETE /api/lyrics/reject?path=&source=  → 撤销拉黑(恢复联网获取)
+// source 省略 → 清空该文件的全部拉黑记录; source 指定 → 只撤销该源, 其余保留。
+// 为什么需要单源撤销: 用户可能只想换掉其中一个源的坏歌词(例如只拉黑了 lrc.cx),
+// 若一律全清, 连原本判定正确的 lrclib 拉黑也一并丢失, 又会把之前确认错误的歌词取回来。
 export async function unRejectLyrics(req, env, db, url) {
   const path = sanitizeRel(url.searchParams.get('path') || '');
   if (!path) return jerr('缺少 path');
-  await ensureRejectTable(db);
-  await db.prepare('DELETE FROM lyrics_reject WHERE path = ?1').bind(path).run();
-  // 撤销拉黑 = 允许重新联网获取: D1 里的空结果也要清掉, 否则 7 天窗口内一直不重试
-  await clearStoredLyrics(db, path);
   const cfg = await lyricsConfigOf(env, db);
+  const chain = chainOf(cfg);
+  await ensureRejectTable(db);
+
+  const source = String(url.searchParams.get('source') || '').trim();
+  let sources;
+  if (source) {
+    if (chain.indexOf(source) < 0) return jerr('该来源不支持拉黑');
+    const cur = await rejectsOf(db, path);
+    sources = cur.filter((s) => s !== source);      // 移除该源, 其余原样保留
+  } else {
+    sources = [];                                    // 全撤销
+  }
+
+  if (!sources.length) {
+    await db.prepare('DELETE FROM lyrics_reject WHERE path = ?1').bind(path).run();
+  } else {
+    await db.prepare(
+      'INSERT INTO lyrics_reject (path, sources, ts) VALUES (?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET sources = ?2, ts = ?3'
+    ).bind(path, JSON.stringify(sources), Date.now()).run();
+  }
+
+  // 撤销拉黑 = 允许重新联网获取: D1 里的结果也要清掉, 否则缓存命中就直接端回来了
+  await clearStoredLyrics(db, path);
   let title = (url.searchParams.get('title') || '').trim();
   let artist = (url.searchParams.get('artist') || '').trim();
   const duration = parseFloat(url.searchParams.get('duration') || '') || 0;
@@ -646,5 +682,5 @@ export async function unRejectLyrics(req, env, db, url) {
     if (!artist) artist = p.artist || '';
   }
   if (title) await cacheDel(lyricsCacheKey(cfg, artist, title, duration));
-  return json({ ok: true });
+  return json({ ok: true, sources });
 }

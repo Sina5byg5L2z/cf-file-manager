@@ -24,7 +24,18 @@ const DEFAULTS = {
   // 歌词: provider 是原文来源, trans_provider 是译文来源(目前只有网易云有译文字段)。
   // netease_base 是自部署 NeteaseCloudMusicApi 的地址 —— 属"用户私有地址",
   // 不随公开的 /api/settings 下发(见 publicOf), 登录态才单独补发。
-  lyrics: { enabled: true, provider: 'auto', trans_provider: 'off', netease_base: '' },
+  // ai_* 是「AI 翻译」用的 OpenAI 兼容接口配置。密钥 ai_key 存配置表（用户在设置里自己填，
+  // 任何厂商均可）；留空时回落 env.SILLICONFLOW_API_KEY（部署期兜底）。公开视图会抹掉 ai_key。
+  lyrics: {
+    enabled: true,
+    provider: 'auto',
+    trans_provider: 'off',
+    netease_base: '',
+    ai_enabled: false,
+    ai_model: 'Qwen/Qwen3-8B',
+    ai_base: 'https://api.siliconflow.cn/v1',
+    ai_key: '',
+  },
 };
 
 const DEVICE_KEYS = ['mobile', 'desktop'];
@@ -37,6 +48,9 @@ const DOWNLOAD_RANGE_MIN = 1 * MB;
 const DOWNLOAD_RANGE_MAX = 32 * MB;
 const LYRICS_PROVIDERS = ['auto', 'lrclib', 'lrc_cx', 'off'];
 const LYRICS_TRANS = ['off', 'netease'];
+const AI_MODEL_DEFAULT = 'Qwen/Qwen3-8B';
+const AI_BASE_DEFAULT = 'https://api.siliconflow.cn/v1';
+const AI_MODEL_MAX = 120;
 
 function clampInt(v, min, max, fallback) {
   const n = parseInt(v, 10);
@@ -57,6 +71,16 @@ function normBase(v) {
   const s = v.trim().replace(/\/+$/, '');
   if (!s || !/^https?:\/\/[^\s]+$/i.test(s)) return '';
   return s.slice(0, 300);
+}
+// AI 接口地址: 合法则用传入值, 非法/为空退回默认(不能留空导致翻译功能失效)
+function normAiBase(v) {
+  const s = normBase(v);
+  return s || AI_BASE_DEFAULT;
+}
+function normAiModel(v) {
+  if (typeof v !== 'string') return AI_MODEL_DEFAULT;
+  const s = v.trim().replace(/[\s\u0000-\u001f]/g, '');
+  return s ? s.slice(0, AI_MODEL_MAX) : AI_MODEL_DEFAULT;
 }
 
 // 把任意输入(部分字段)归一成合法完整设置; maxUpload = 服务端 MAX_UPLOAD_SIZE
@@ -101,6 +125,10 @@ function normalize(input, maxUpload) {
     provider: LYRICS_PROVIDERS.includes(lyr.provider) ? lyr.provider : DEFAULTS.lyrics.provider,
     trans_provider: LYRICS_TRANS.includes(lyr.trans_provider) ? lyr.trans_provider : DEFAULTS.lyrics.trans_provider,
     netease_base: normBase(lyr.netease_base),
+    ai_enabled: lyr.ai_enabled === true,
+    ai_model: normAiModel(lyr.ai_model),
+    ai_base: normAiBase(lyr.ai_base),
+    ai_key: String(lyr.ai_key || '').trim().slice(0, 300),
   };
   return out;
 }
@@ -109,7 +137,7 @@ function normalize(input, maxUpload) {
 // 不能把用户自部署的地址发给任何人。
 function publicOf(s) {
   const o = JSON.parse(JSON.stringify(s));
-  if (o.lyrics) o.lyrics.netease_base = '';
+  if (o.lyrics) { o.lyrics.netease_base = ''; o.lyrics.ai_key = ''; }
   return o;
 }
 
@@ -168,6 +196,20 @@ export async function lyricsConfigOf(env, db) {
   return v;
 }
 
+// ---- 服务端读取 AI 翻译配置 ----
+// 复用 LYRICS_MEMO(同一份 lyrics 对象), 只挑翻译需要的字段, 顺带判定"密钥是否就绪"。
+export async function lyricsAiOf(env, db) {
+  const lyr = await lyricsConfigOf(env, db);
+  return {
+    enabled: lyr.ai_enabled === true,
+    model: lyr.ai_model || AI_MODEL_DEFAULT,
+    base: lyr.ai_base || AI_BASE_DEFAULT,
+    key: lyr.ai_key || '',
+    // 用户在设置里填了密钥 → 用配置里的; 否则回落部署期 env 兜底
+    hasKey: !!(lyr.ai_key || (env && env.SILLICONFLOW_API_KEY)),
+  };
+}
+
 // GET /api/settings — 公开接口(分享页也读), 走边缘缓存 5 分钟, PUT 时主动失效。
 // 缓存里存的是"脱敏版本"; 已登录时再单独补上私有字段, 否则设置页回填不出地址,
 // 用户改任一设置后全量提交就会把地址清空。
@@ -185,10 +227,13 @@ export async function getSettings(req, env, db) {
     const denied = await auth.checkAuth(req, env);
     if (!denied) {
       const stored = await readStored(db);
-      const base = normalize(stored, maxUploadOf(env)).lyrics.netease_base;
-      if (base) {
+      const lyr = normalize(stored, maxUploadOf(env)).lyrics;
+      if (lyr.netease_base || lyr.ai_key) {
         const o = JSON.parse(payload);
-        if (o.settings && o.settings.lyrics) o.settings.lyrics.netease_base = base;
+        if (o.settings && o.settings.lyrics) {
+          o.settings.lyrics.netease_base = lyr.netease_base;
+          o.settings.lyrics.ai_key = lyr.ai_key;
+        }
         payload = JSON.stringify(o);
       }
     }

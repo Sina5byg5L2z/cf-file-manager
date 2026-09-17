@@ -46,6 +46,7 @@
         lyricIndex: -2,
         dragging: false,
         gen: 0,              // 播放代次: 异步回调据此判断结果是否已过期
+        origLrc: '',         // 当前曲的纯原文(带时间戳), 供「复制歌词」使用
     };
 
     // ---------------- 工具 ----------------
@@ -123,6 +124,7 @@
             '    <button class="mp-btn mp-ic" data-act="collapse" title="收起">' + ICONS.collapse + '</button>',
             // 全屏页盖住了底栏, 所以列表入口这里也要有一个
             '    <button class="mp-btn mp-ic" data-act="queue" title="播放列表">' + ICONS.queue + '</button>',
+            '    <button class="mp-btn" data-act="copy" id="smCopy" style="display:none" title="复制带时间戳的原文歌词">复制歌词</button>',
             '    <span class="mp-note" id="smSource"></span>',
             '  </div>',
             '  <div class="mp-full-body">',
@@ -163,6 +165,7 @@
         el.title = q('#smTitle'); el.sub = q('#smSub');
         el.ftitle = q('#smFtitle'); el.fsub = q('#smFsub');
         el.lyrics = q('#smLyrics'); el.source = q('#smSource');
+        el.copy = q('#smCopy');
         el.cur = q('#smCur'); el.dur = q('#smDur'); el.fill = q('#smFill'); el.knob = q('#smKnob');
         el.track = q('#smTrack'); el.vol = q('#smVol'); el.ofsVal = q('#smOfsVal'); el.fontVal = q('#smFontVal');
         el.qlist = q('#smQueueList');
@@ -242,6 +245,9 @@
                 : (d.found ? ('歌词来源: ' + (d.source || '在线')) : (d.rejected ? '歌词已停用' : ''));
 
             var L = global.Lyrics;
+            // 纯原文(带时间戳)单独留一份给「复制歌词」——复制给外部大模型翻译的必须是
+            // 纯原文, 不能是 state.lines(经过显示模式过滤, 且混着译文)。
+            state.origLrc = (d.found && d.synced && L && L.hasTimestamps(d.synced)) ? d.synced : '';
             if (d.found && d.synced && L) {
                 state.timed = L.hasTimestamps(d.synced);
                 state.lines = state.timed ? L.merge(L.parse(d.synced), L.parse(d.trans), L.parse(d.roma))
@@ -266,11 +272,49 @@
                 state.lines = [];
             }
             renderLyrics();
+            syncCopyBtn();
         }).catch(function () {
             if (gen !== state.gen) return;
             state.lines = [];
+            state.origLrc = '';
             renderLyrics();
+            syncCopyBtn();
         });
+    }
+
+    // 「复制歌词」只在有带时间轴原文时出现(分享页为只读: 不提供 AI 翻译, 避免无鉴权通道消耗 API 额度)
+    function syncCopyBtn() {
+        if (!el.copy) return;
+        el.copy.style.display = (state.origLrc && state.origLrc.trim()) ? '' : 'none';
+    }
+
+    function copyLyrics() {
+        var src = (state.origLrc || '').trim();
+        if (!src) { if (global.Dialog) Dialog.alert('这首歌没有带时间轴的原文歌词'); return; }
+        // 同管理页: 复制内容自带翻译指令, 模型回复可整段粘回译文框
+        var text = (global.Lyrics && global.Lyrics.copyPrompt ? global.Lyrics.copyPrompt + '\n' : '') + src;
+        var done = function (ok) {
+            if (global.Dialog) Dialog.alert(ok ? '已复制歌词与翻译指令，粘贴到网页版大模型即可翻译' : '复制失败，请手动选择歌词复制');
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(fallbackCopy(text)); });
+        } else {
+            done(fallbackCopy(text));
+        }
+    }
+
+    function fallbackCopy(text) {
+        try {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            var ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+        } catch (e) { return false; }
     }
 
     // ---------------- 渲染 ----------------
@@ -357,6 +401,8 @@
         state.index = -1;
         state.cur = null;
         state.lines = [];
+        state.origLrc = '';
+        syncCopyBtn();
         state.timed = true;
         state.lyricIndex = -2;
         try { audio.pause(); } catch (e) {}
@@ -394,6 +440,8 @@
         var p = parseName(item.name);
         state.cur = { name: item.name, subPath: item.subPath, title: p.title, artist: p.artist, coverUrl: null };
         state.lines = [];
+        state.origLrc = '';       // 必须先清: 否则新歌在新歌词到达前, 「复制歌词」给的是上一首的
+        syncCopyBtn();
         state.timed = true;
         state.lyricIndex = -3;
         ofs = 0;
@@ -492,11 +540,14 @@
             else if (act === 'font+') applyFont(fonts + 1);
             else if (act === 'ofs-') adjustOffset(-500);
             else if (act === 'ofs+') adjustOffset(500);
+            else if (act === 'copy') copyLyrics();
         });
 
         document.addEventListener('keydown', function (e) {
+            // 可编辑控件里不能抢键(输入框/文本域/下拉/富文本)
             var tag = ((e.target && e.target.tagName) || '').toLowerCase();
-            if (tag === 'input' || tag === 'textarea') return;
+            if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+            if (e.target && e.target.closest && e.target.closest('[contenteditable="true"]')) return;
             if (e.key === 'Escape') {
                 if (el.qpanel.style.display !== 'none') toggleQueue(false);
                 else if (el.full.style.display !== 'none') openFull(false);

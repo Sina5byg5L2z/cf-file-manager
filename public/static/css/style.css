@@ -552,6 +552,8 @@ body.has-upload-launcher .upload-progress{bottom:80px}
 .dlg-body{padding:10px 20px 4px;font-size:13px;color:var(--text-secondary);line-height:1.6;word-break:break-word;max-height:40vh;overflow-y:auto}
 .dlg-input{display:block;width:92%;box-sizing:border-box;margin:10px auto 0;padding:8px 10px;background:var(--bg-base);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;outline:none;transition:border-color .15s}
 .dlg-input:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-glow)}
+.dlg-choice{display:flex;flex-direction:column;gap:6px;padding:10px 20px 0}
+.dlg-choice-btn{width:100%;justify-content:center;box-sizing:border-box}
 .dlg-actions{display:flex;justify-content:flex-end;gap:8px;padding:14px 20px 16px}
 .dlg-danger{background:var(--color-error);border-color:var(--color-error);color:#fff}
 .dlg-danger:hover{background-image:linear-gradient(rgba(255,255,255,0.08),rgba(255,255,255,0.08))}
@@ -671,6 +673,7 @@ body.has-upload-launcher .upload-progress{bottom:80px}
 .mp-roma { font-size: 0.74em; color: var(--text-tertiary); }
 .mp-lyric-empty { padding: 40px 0; text-align: center; font-size: 13px; color: var(--text-tertiary); }
 .mp-lyric-empty .mp-btn { margin-top: 12px; }
+.mp-rej-list { font-size: 12px; opacity: .8; }
 .mp-offset { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding-top: 12px; margin-top: 10px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); }
 .mp-ofs-gap { flex: 1 1 12px; }
 
@@ -678,6 +681,11 @@ body.has-upload-launcher .upload-progress{bottom:80px}
 .mp-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; font-size: 13px; font-weight: 500; color: var(--text-primary); border-bottom: 1px solid var(--border); }
 .mp-clear { flex: none; padding: 2px 10px; font-size: 12px; color: var(--color-error); border-color: var(--color-error); }
 .mp-clear:hover { background: rgba(248,81,73,0.15); }
+/* 头部按钮切到"取消拉黑"态时用蓝色区分，避免和"歌词不对？拉黑"混为一谈 */
+.mp-unreject { color: var(--accent) !important; border-color: var(--accent) !important; }
+.mp-unreject:hover { background: var(--accent-subtle) !important; color: var(--accent) !important; }
+/* AI 翻译进行中: 按钮禁用态与提示色, 让等待过程可见 */
+.mp-btn[data-act="aitrans"]:disabled { opacity: .6; cursor: default; }
 .mp-panel-list { padding: 6px; }
 .mp-qitem { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
 .mp-qitem:hover { background: var(--hover-bg); }

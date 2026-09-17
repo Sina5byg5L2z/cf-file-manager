@@ -43,6 +43,8 @@
         rateIdx: 1,
         seeking: false,
         lyricFont: 15,   // 歌词字号(px), T+/T- 调整, localStorage 持久化
+        origLrc: '',     // 当前曲的纯原文(带时间戳), 供「复制歌词」/「AI 翻译」使用
+        aiBusy: false,   // AI 翻译进行中(防重复点击)
     };
     var booted = false;
     var playSeq = 0;   // 播放代次: 切歌/清空队列时 +1, 异步回调据此丢弃过期结果
@@ -95,6 +97,8 @@
             '  <div class="mp-full-head">',
             '    <button class="mp-btn mp-ic" data-act="collapse" title="收起">' + ICONS.collapse + '</button>',
             '    <button class="mp-btn" data-act="info">歌曲信息</button>',
+            '    <button class="mp-btn" data-act="copy" id="mpCopy" style="display:none" title="复制带时间戳的原文歌词，可粘贴到网页版大模型翻译">复制歌词</button>',
+            '    <button class="mp-btn" data-act="aitrans" id="mpAi" style="display:none" title="用小模型逐行翻译，结果自动保存为译文">AI 翻译</button>',
             '    <span class="mp-note" id="mpSource"></span>',
             '    <button class="mp-btn" data-act="reject" id="mpReject" style="display:none">歌词不对？拉黑</button>',
             '  </div>',
@@ -168,6 +172,8 @@
         el.lyrics = q('#mpLyrics');
         el.source = q('#mpSource');
         el.reject = q('#mpReject');
+        el.copy = q('#mpCopy');
+        el.ai = q('#mpAi');
         el.ofsVal = q('#mpOfsVal');
         el.queue = q('#mpQueue');
         el.queueList = q('#mpQueueList');
@@ -215,8 +221,14 @@
             else if (act === 'ofs+') adjustOffset(500);
             else if (act === 'font-') adjustFont(-1);
             else if (act === 'font+') adjustFont(1);
-            else if (act === 'reject') rejectLyric();
-            else if (act === 'unreject') unRejectLyric();
+            else if (act === 'reject') {
+                // 同一个按钮, 按当前状态决定是拉黑还是取消拉黑
+                if (t.getAttribute('data-mode') === 'unreject') askUnReject();
+                else rejectLyric();
+            }
+            else if (act === 'unreject') unRejectLyric('');
+            else if (act === 'copy') copyLyrics();
+            else if (act === 'aitrans') aiTranslate();
         });
 
         el.vol.addEventListener('input', function () {
@@ -267,6 +279,10 @@
         var item = state.queue[i];
         state.lines = [];
         state.lyricIndex = -2;
+        state.rejectedSources = null;   // 换歌了, 上一首的拉黑记录必须清空, 否则"取消拉黑"会作用到新歌上
+        state.origLrc = '';             // 上一首的纯原文同样必须清: 否则新歌词到达前"复制/AI翻译"给的是旧歌
+        state.aiBusy = false;           // 在途翻译的回调会被代次守卫丢弃, 不复位的话按钮永久禁用
+        syncTools();
         el.lyrics.innerHTML = '<div class="mp-lyric-empty">加载中…</div>';
         renderBar();
 
@@ -325,19 +341,147 @@
     }
 
     // ---------------- 歌词拉黑 ----------------
-    // 按钮状态由 applyLyric 后的 syncRejectBtn 决定:
-    //   在线源(lrclib/lrc.cx) → "歌词不对？拉黑"   拉黑当前源, 服务端降级到下一源
-    //   无歌词但有剩余源       → "其余来源也拉黑"   链上剩余源全部拉黑
-    //   已全拉黑              → 按钮隐藏, 空态里给"撤销拉黑"
+    // 头部只有一个按钮, 按当前状态切换语义(拉黑 ↔ 取消拉黑):
+    //   在线源(lrclib/lrc.cx)     → "歌词不对？拉黑"   拉黑当前源, 服务端降级到下一源
+    //   无歌词但有剩余源          → "其余来源也拉黑"   链上剩余源全部拉黑
+    //   有被拉黑的来源            → "取消拉黑"        撤销(单个来源时直接撤销, 多个时让用户选)
+    // 为什么要有"取消拉黑": 拉黑是"这首歌这个源不对"的判断, 用户可能判断错了要回退。
+    // 此前只有"全拉黑"的空态里才有撤销入口, 部分拉黑时界面上根本没法撤销。
+    function rejectedList() {
+        return (state.rejectedSources && state.rejectedSources.length) ? state.rejectedSources : null;
+    }
+
     function syncRejectBtn() {
         if (!el.reject) return;
         var src = state.source;
+        var rej = rejectedList();
+        if (rej) {
+            // 有撤销对象时按钮优先做"取消拉黑"——用户拉黑后最可能的下一个动作就是反悔
+            el.reject.textContent = '取消拉黑';
+            el.reject.setAttribute('data-mode', 'unreject');
+            el.reject.classList.add('mp-unreject');
+            el.reject.style.display = '';
+            el.reject.title = '撤销拉黑来源：' + rej.join('、');
+            return;
+        }
         var label;
         if (src === 'lrclib' || src === 'lrc.cx') label = '歌词不对？拉黑';
-        else if (src === 'none' && state.rejectedSources && state.rejectedSources.length) label = '其余来源也拉黑';
+        else if (src === 'none') label = '其余来源也拉黑';
         else label = null;
+        el.reject.removeAttribute('data-mode');
+        el.reject.classList.remove('mp-unreject');
         el.reject.style.display = label ? '' : 'none';
+        el.reject.title = '';
         if (label) el.reject.textContent = label;
+    }
+
+    // ---------------- 歌词工具按钮 (复制 / AI 翻译) ----------------
+    // 「复制歌词」: 只在有原文时出现 —— 复制的就是纯原文(带时间戳), 拿去网页版大模型
+    //   翻完直接原样粘回「歌曲信息 → 译文」即可落库, 与 AI 翻译的输入格式完全一致。
+    // 「AI 翻译」: 除了要有原文, 还要服务端开了 AI 翻译开关(设置经由 /api/settings 下发)。
+    function syncTools() {
+        var hasOrig = !!(state.origLrc && String(state.origLrc).trim());
+        if (el.copy) {
+            el.copy.style.display = hasOrig ? '' : 'none';
+        }
+        if (el.ai) {
+            var on = hasOrig && global.AppSettings && global.AppSettings.aiTranslateOn
+                && global.AppSettings.aiTranslateOn();
+            el.ai.style.display = on ? '' : 'none';
+            if (state.aiBusy) {
+                el.ai.disabled = true;
+                el.ai.textContent = '翻译中…';
+            } else {
+                el.ai.disabled = false;
+                el.ai.textContent = 'AI 翻译';
+            }
+        }
+    }
+
+    function copyLyrics() {
+        var src = (state.origLrc || '').trim();
+        if (!src) {
+            if (global.Dialog) Dialog.alert('这首歌还没有带时间轴的原文歌词，无法复制');
+            return;
+        }
+        // 复制内容 = 翻译指令 + 空行 + 带时间戳原文: 网页大模型拿到就知道要干嘛,
+        // 回复(带原时间戳的译文 LRC)可整段粘回「歌曲信息 → 译文」保存
+        var text = (global.Lyrics && global.Lyrics.copyPrompt ? global.Lyrics.copyPrompt + '\n' : '') + src;
+        var done = function (ok) {
+            if (!global.Dialog) return;
+            if (ok) Dialog.alert('已复制歌词与翻译指令。\n\n粘贴到网页版大模型（如 DeepSeek/GLM），把它的回复整段粘回「歌曲信息 → 译文」保存即可。');
+            else Dialog.alert('复制失败，请手动从「歌曲信息」里复制');
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () { done(true); }, function () {
+                done(fallbackCopy(text));
+            });
+        } else {
+            done(fallbackCopy(text));
+        }
+    }
+
+    // 非安全上下文/旧浏览器没有 clipboard API 时的兜底: 临时 textarea + execCommand
+    function fallbackCopy(text) {
+        try {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            var ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+        } catch (e) { return false; }
+    }
+
+    function aiTranslate() {
+        var c = state.current;
+        if (!c || state.aiBusy) return;
+        if (!global.Dialog) return;
+        if (!global.API || !global.API.lyricsTranslate) {
+            Dialog.alert('当前页面不支持 AI 翻译');
+            return;
+        }
+        var text = (state.origLrc || '').trim();
+        if (!text) {
+            Dialog.alert('这首歌还没有带时间轴的原文歌词，无法翻译');
+            return;
+        }
+        state.aiBusy = true;
+        syncTools();
+        var dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+        global.API.lyricsTranslate(c.path, {
+            lrc: text, title: c.title || '', artist: c.artist || '', duration: dur,
+        }).then(function (r) {
+            if (state.current !== c) return;                 // 已切歌则丢弃
+            state.aiBusy = false;
+            if (!r || !r.trans) {
+                syncTools();
+                Dialog.alert('翻译失败：返回结果为空');
+                return;
+            }
+            // 译文写进了 track_meta.trans(等价于手填译文) → 本地也要同步,
+            // 否则下次重进这首歌时, 内存里的 c.trans 还是旧的, 覆盖层又失效了。
+            c.trans = r.trans;
+            // 本地歌词缓存也要更新, 否则切歌回来命中的是"没有译文"的旧缓存
+            var TM = global.TrackMeta;
+            if (TM && TM.cache && TM.cache.put && state.lines.length) {
+                TM.cache.put(lyricKey(), {
+                    synced: text, trans: r.trans, roma: null,
+                    source: state.source || 'online', ts: Date.now(),
+                });
+            }
+            applyLyric(text, r.trans, null, state.source || 'online');
+            var note = r.note ? '\n' + r.note : '';
+            Dialog.alert('翻译完成，已保存为这首歌的译文（' + (r.calls || 1) + ' 次请求）' + note);
+        }).catch(function (e) {
+            if (state.current !== c) return;
+            state.aiBusy = false;
+            syncTools();
+            Dialog.alert('翻译失败：' + ((e && e.message) || '未知错误'));
+        });
     }
 
     function rejectLyric() {
@@ -358,14 +502,38 @@
         }).catch(function () {});
     }
 
-    function unRejectLyric() {
-        var c = state.current;
-        if (!c || !global.API) return;
-        global.API.lyricsUnreject(c.path, {
+    function unrejectOpts(c) {
+        return {
             duration: Number.isFinite(audio.duration) ? audio.duration : 0,
             title: c.title || '', artist: c.artist || '',
-        }).then(function () {
+        };
+    }
+
+    // 单个来源 → 直接撤销; 多个来源 → 弹窗选择撤销哪个(或全部)。
+    function unRejectLyric(source) {
+        var c = state.current;
+        if (!c || !global.API) return;
+        var opts = unrejectOpts(c);
+        if (source) opts.source = source;
+        global.API.lyricsUnreject(c.path, opts).then(function () {
+            state.rejectedSources = null;   // 让下次拉取重新问服务端, 而不是拿本地旧值判断
             loadLyrics(true);
+        }).catch(function () {});
+    }
+
+    function askUnReject() {
+        var c = state.current;
+        if (!c || !global.API) return;
+        var rej = rejectedList() || [];
+        if (rej.length <= 1) { unRejectLyric(rej[0] || ''); return; }
+        if (!global.Dialog || !global.Dialog.choice) { unRejectLyric(''); return; }
+        global.Dialog.choice('这首歌有以下来源被拉黑，选择要恢复的来源：',
+            rej.map(function (s) { return { label: '恢复 ' + s, value: s }; })
+                .concat([{ label: '全部恢复', value: '', primary: true }]),
+            { title: '取消歌词拉黑' }
+        ).then(function (v) {
+            if (v === null || v === undefined) return;
+            unRejectLyric(v);
         }).catch(function () {});
     }
 
@@ -376,12 +544,18 @@
         state.lines = orig.length ? L.merge(orig, L.parse(trans), L.parse(roma))
             : (trans ? (L.transOnly ? L.transOnly(trans) : []) : []);
         state.source = source || 'online';
+        // 原文留一份给「复制歌词」和「AI 翻译」用 —— state.lines 经过模式过滤后不完整,
+        // 译文也不能混进去(复制给大模型的必须是纯原文)。
+        state.origLrc = (synced && L.hasTimestamps(synced)) ? synced : '';
         syncRejectBtn();
+        syncTools();
         renderModes();
         renderLyrics();
         if (source === 'rejected') {
-            el.lyrics.innerHTML = '<div class="mp-lyric-empty">歌词已拉黑，此曲不再联网获取<br>'
-                + '<button class="mp-btn" data-act="unreject">撤销拉黑</button></div>';
+            var rj = rejectedList() || [];
+            el.lyrics.innerHTML = '<div class="mp-lyric-empty">歌词已拉黑，此曲不再联网获取'
+                + (rj.length ? '<br><span class="mp-rej-list">已拉黑：' + rj.join('、') + '</span>' : '')
+                + '<br><button class="mp-btn" data-act="unreject">取消拉黑</button></div>';
         } else if (source === 'none') {
             el.lyrics.innerHTML = '<div class="mp-lyric-empty">没有找到歌词，可在「歌曲信息」里补充歌名或手动粘贴</div>';
         }
@@ -399,6 +573,16 @@
         var hasOrig = synced && global.Lyrics.hasTimestamps(synced);
         if (hasOrig) {
             applyLyric(synced, c.trans, null, c.lrc ? 'manual' : 'id3');
+            // 手填原文时不会走下面的联网分支, rejectedSources 就没人填 ——
+            // 而"这首歌有没有拉黑记录"只有服务端知道。不单独问一次的话,
+            // 用户在手填了原文的曲子上拉黑过来源后, 头部"取消拉黑"按钮永远不出现。
+            if (c.lrc && global.API && global.API.lyricsRejects) {
+                global.API.lyricsRejects(c.path).then(function (r) {
+                    if (state.current !== c) return;                 // 已切歌则丢弃
+                    state.rejectedSources = (r && r.sources && r.sources.length) ? r.sources : null;
+                    syncRejectBtn();
+                }).catch(function () { /* 拿不到就不显示撤销入口, 不影响播放 */ });
+            }
             return;
         }
         if (!global.API) {
@@ -762,5 +946,13 @@
         audio: function () { return audio; },
         // 强制绕过本地缓存重取歌词(「重新联网获取」按钮走的是同一条路)
         reloadLyrics: function () { if (state.current) refetchLyrics(); },
+        // 测试探针: 当前曲子被拉黑的来源列表(决定头部按钮是"拉黑"还是"取消拉黑")
+        rejected: function () { return state.rejectedSources ? state.rejectedSources.slice() : []; },
+        source: function () { return state.source; },
+        // 测试探针: 当前用于复制/翻译的纯原文
+        origLrc: function () { return state.origLrc; },
+        aiBusy: function () { return !!state.aiBusy; },
+        // 供 E2E 直接触发(避免依赖剪贴板权限)
+        aiTranslate: aiTranslate,
     };
 })(window);

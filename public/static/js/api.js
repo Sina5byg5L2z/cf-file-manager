@@ -344,12 +344,29 @@ const API = {
             artist: opts.artist || '',
         });
     },
+    // 撤销拉黑: opts.source 省略 → 清空该文件全部拉黑记录; 指定 → 只撤销该来源
     lyricsUnreject(path, opts = {}) {
         const p = new URLSearchParams({ path });
+        if (opts.source) p.set('source', opts.source);
         if (opts.duration) p.set('duration', String(Math.round(opts.duration)));
         if (opts.title) p.set('title', opts.title);
         if (opts.artist) p.set('artist', opts.artist);
-        return this.request('DELETE', `/api/lyrics/reject?${p}`);
+        return this.json('DELETE', `/api/lyrics/reject?${p}`);
+    },
+    // 读取该文件当前的拉黑记录(供"取消拉黑"列出可撤销的来源)
+    lyricsRejects(path) {
+        const p = new URLSearchParams({ path });
+        return this.json('GET', `/api/lyrics/reject?${p}`);
+    },
+    // AI 翻译: 带上本地已渲染的原文(lrc), 服务端就不必再走一次上游
+    lyricsTranslate(path, opts = {}) {
+        return this.json('POST', '/api/lyrics/translate', {
+            path,
+            lrc: opts.lrc || '',
+            title: opts.title || '',
+            artist: opts.artist || '',
+            duration: opts.duration || 0,
+        });
     },
     // 专辑封面在线查找(内嵌封面缺失时的兜底): 网易云(自部署) > Deezer > iTunes, Worker 侧缓存
     cover(path, opts = {}) {

@@ -14,6 +14,7 @@ import * as storageApi from './storage.js';
 import * as blobops from './blobops.js';
 import * as lyrics from './lyrics.js';
 import * as trackmeta from './trackmeta.js';
+import * as translate from './translate.js';
 
 export default {
   async fetch(request, env, ctx) {
@@ -148,9 +149,12 @@ async function route(request, env, ctx) {
   if (path === '/api/track/meta' && method === 'PUT') return trackmeta.putMeta(request, env, db);
   // 音乐: 歌词代理 (Worker 转发, 统一 UA/超时/降级/缓存)
   if (path === '/api/lyrics' && method === 'GET') return lyrics.getLyrics(request, env, db, url);
+  if (path === '/api/lyrics/reject' && method === 'GET') return lyrics.listRejects(request, env, db, url);
   if (path === '/api/lyrics/reject' && method === 'POST') return lyrics.rejectLyrics(request, env, db);
   if (path === '/api/lyrics/reject' && method === 'DELETE') return lyrics.unRejectLyrics(request, env, db, url);
   if (path === '/api/cover' && method === 'GET') return lyrics.getCover(request, env, db, url);
+  // 音乐: AI 翻译 (点击按钮触发, 走小模型; 结果写回 track_meta.trans)
+  if (path === '/api/lyrics/translate' && method === 'POST') return translate.translateLyrics(request, env, db);
 
   // 视频清晰度 (降级: 仅原片)
   if (path === '/api/video/qualities' && method === 'GET') return vfs.videoQualities(request, env, db, url);

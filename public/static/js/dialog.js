@@ -2,6 +2,7 @@
 // Dialog.alert(msg, {title, okText})              -> Promise<void>
 // Dialog.confirm(msg, {title, okText, danger})    -> Promise<boolean>
 // Dialog.prompt(msg, value, {title, placeholder}) -> Promise<string|null>
+// Dialog.choice(msg, [{label, value, primary}])   -> Promise<value|null>  多选一
 //
 // 设计：意图图标章（danger 红 / accent 蓝 / info 灰）+ 焦点圈定 + 焦点归还 + reduced-motion
 (function () {
@@ -55,6 +56,20 @@
             box.appendChild(inputEl);
         }
 
+        // 多选一(list): 每个选项一个按钮, 点谁 resolve 谁
+        let choiceEls = null;
+        if (opts.options && opts.options.length) {
+            const list = el('div', 'dlg-choice');
+            choiceEls = opts.options.map(o => {
+                const b = el('button', 'btn dlg-choice-btn' + (o.primary ? ' btn-primary' : ''), o.label);
+                b.type = 'button';
+                b.setAttribute('data-value', String(o.value));
+                list.appendChild(b);
+                return b;
+            });
+            box.appendChild(list);
+        }
+
         const actions = el('div', 'dlg-actions');
         let cancelBtn = null;
         if (opts.cancelText !== null) {
@@ -62,13 +77,16 @@
             cancelBtn.type = 'button';
             actions.appendChild(cancelBtn);
         }
-        const okBtn = el('button', 'btn btn-primary' + (opts.danger ? ' dlg-danger' : ''), opts.okText);
-        okBtn.type = 'button';
-        actions.appendChild(okBtn);
+        let okBtn = null;
+        if (!choiceEls) {
+            okBtn = el('button', 'btn btn-primary' + (opts.danger ? ' dlg-danger' : ''), opts.okText);
+            okBtn.type = 'button';
+            actions.appendChild(okBtn);
+        }
 
         box.appendChild(actions);
         overlay.appendChild(box);
-        return { overlay, inputEl, okBtn, cancelBtn };
+        return { overlay, inputEl, okBtn, cancelBtn, choiceEls };
     }
 
     function open(opts) {
@@ -100,7 +118,8 @@
                     accept();
                 } else if (e.key === 'Tab') {
                     // 焦点圈定：仅在弹窗内控件间循环
-                    const items = [ui.inputEl, ui.cancelBtn, ui.okBtn].filter(Boolean);
+                    const items = [ui.inputEl, ui.cancelBtn, ui.okBtn].filter(Boolean)
+                        .concat(ui.choiceEls || []);
                     const i = items.indexOf(document.activeElement);
                     e.preventDefault();
                     const next = e.shiftKey ? (i <= 0 ? items.length - 1 : i - 1) : (i === items.length - 1 || i < 0 ? 0 : i + 1);
@@ -108,8 +127,11 @@
                 }
             }
 
-            ui.okBtn.addEventListener('click', accept);
+            if (ui.okBtn) ui.okBtn.addEventListener('click', accept);
             if (ui.cancelBtn) ui.cancelBtn.addEventListener('click', cancel);
+            (ui.choiceEls || []).forEach(b => {
+                b.addEventListener('click', () => finish(b.getAttribute('data-value')));
+            });
             ui.overlay.addEventListener('mousedown', e => {
                 if (e.target === ui.overlay) cancel();
             });
@@ -120,8 +142,10 @@
             if (ui.inputEl) {
                 ui.inputEl.focus();
                 if (ui.inputEl.value) ui.inputEl.select();
-            } else {
+            } else if (ui.okBtn) {
                 ui.okBtn.focus();
+            } else if (ui.choiceEls && ui.choiceEls.length) {
+                ui.choiceEls[0].focus();
             }
         });
     }
@@ -135,6 +159,13 @@
         },
         prompt(message, value = '', o = {}) {
             return open({ title: o.title || '输入', message, kind: 'accent', okText: o.okText || '确定', cancelText: '取消', input: { value, placeholder: o.placeholder } });
+        },
+        // 多选一: options = [{label, value, primary?}], 返回选中项的 value, 取消返回 null
+        choice(message, options, o = {}) {
+            return open({
+                title: o.title || '请选择', message, kind: o.kind || 'info',
+                options: options || [], cancelText: o.cancelText === undefined ? '取消' : o.cancelText,
+            });
         }
     };
 })();

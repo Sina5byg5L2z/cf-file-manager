@@ -11,7 +11,11 @@ const AppSettings = {
         preview_html:     { mobile: 1048576,  desktop: 5242880 },
         download_range:   8388608,   // 单次下载窗口(字节): 服务端 Range 上限 = 页面内分片下载每段大小
         // 歌词: provider=原文来源, trans_provider=译文来源, netease_base=自部署地址(仅登录态下发)
-        lyrics: { enabled: true, provider: 'auto', trans_provider: 'off', netease_base: '' },
+        // ai_*: 「AI 翻译」按钮用的 OpenAI 兼容接口(地址/模型/密钥均可在此配置, 任意厂商)
+        lyrics: {
+            enabled: true, provider: 'auto', trans_provider: 'off', netease_base: '',
+            ai_enabled: false, ai_model: 'Qwen/Qwen3-8B', ai_base: 'https://api.siliconflow.cn/v1', ai_key: '',
+        },
     },
 
     data: null,        // 服务端加载成功后的完整设置; null = 未加载(用默认)
@@ -51,8 +55,15 @@ const AppSettings = {
             provider: l.provider || 'auto',
             trans_provider: l.trans_provider || 'off',
             netease_base: typeof l.netease_base === 'string' ? l.netease_base : '',
+            ai_enabled: l.ai_enabled === true,
+            ai_model: typeof l.ai_model === 'string' && l.ai_model ? l.ai_model : this.defaults.lyrics.ai_model,
+            ai_base: typeof l.ai_base === 'string' && l.ai_base ? l.ai_base : this.defaults.lyrics.ai_base,
+            ai_key: typeof l.ai_key === 'string' ? l.ai_key : '',
         };
     },
+
+    // 供播放器判断要不要显示「AI 翻译」按钮
+    aiTranslateOn() { return this.lyrics().ai_enabled === true; },
 
     // 用原生 fetch (管理页/分享页通用; 分享页无 api.js 与 token, GET 本就是公开接口)
     load() {
@@ -278,6 +289,17 @@ const SettingsUI = {
         this._mb('setLyricsProvider').value = lyr.provider;
         this._mb('setLyricsTrans').value = lyr.trans_provider;
         this._mb('setNeteaseBase').value = lyr.netease_base;
+        this._mb('setAiEnabled').checked = lyr.ai_enabled;
+        this._mb('setAiModel').value = lyr.ai_model;
+        this._mb('setAiBase').value = lyr.ai_base;
+        this._mb('setAiKey').value = lyr.ai_key || '';
+        const keyShow = this._mb('setAiKeyShow');
+        if (!keyShow._bound) {
+            keyShow._bound = true;
+            keyShow.addEventListener('change', () => {
+                this._mb('setAiKey').type = keyShow.checked ? 'text' : 'password';
+            });
+        }
         document.getElementById('setError').style.display = 'none';
         this.modal.style.display = 'flex';
         // 存储分库面板 (库清单 / 名额 / 一键扩容) 随设置弹窗一起加载
@@ -307,11 +329,25 @@ const SettingsUI = {
         if (trans === 'netease' && !/^https?:\/\/\S+$/i.test(base)) {
             throw new Error('译文来源选了「网易云」，必须填写自部署 API 地址（http/https 开头）');
         }
+        // AI 翻译: 开了就必须有合法地址与模型名, 否则点了按钮才发现配错
+        const aiOn = this._mb('setAiEnabled').checked;
+        const aiModel = String(this._mb('setAiModel').value || '').trim();
+        const aiBase = String(this._mb('setAiBase').value || '').trim().replace(/\/+$/, '');
+        if (aiOn) {
+            if (!aiModel) throw new Error('已启用 AI 翻译，请填写模型名（如 Qwen/Qwen3-8B）');
+            if (!/^https?:\/\/\S+$/i.test(aiBase)) throw new Error('已启用 AI 翻译，请填写合法的接口地址（http/https 开头）');
+        }
+        // 密钥不强制: 留空回落服务端 env 兜底; 填了则以配置里的为准
+        const aiKey = String(this._mb('setAiKey').value || '').trim().slice(0, 300);
         return {
             enabled: this._mb('setLyricsEnabled').checked,
             provider: this._mb('setLyricsProvider').value,
             trans_provider: trans,
             netease_base: base,
+            ai_enabled: aiOn,
+            ai_model: aiModel,
+            ai_base: aiBase,
+            ai_key: aiKey,
         };
     },
 
@@ -349,3 +385,6 @@ const SettingsUI = {
         }
     }
 };
+
+// 顶层 const 不进 window —— 播放器(musicplayer.js)要读 AI 翻译开关, 必须显式挂
+window.AppSettings = AppSettings;
