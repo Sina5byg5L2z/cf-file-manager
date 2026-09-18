@@ -11,9 +11,9 @@ import {
   CHUNK_SIZE, CACHE_MAX_FILE, deriveChunkSize, chunkCount, json, jerr, sanitizeRel, sanitizeFilename, splitPath,
   mimeFromName, fileExt, isTextName, isImageName, isVideoName, isPdfName,
   contentDisposition, encodeFilename, parseRange, cacheGet, cachePut, cacheDel,
-  blobStream, crcOfStream, zipStream, randomId, subtreeMatch,
+  blobStream, crcOfStream, zipStream, randomId, subtreeMatch, SEC_HEADERS,
 } from './util.js';
-import { validateToken } from './auth.js';
+import { validateToken, checkTokenFresh } from './auth.js';
 import { rangeMaxOf } from './settings.js';
 import { dbById, dbOfNode, pickDb, capacityResponse, bumpUsage } from './storage.js';
 import { collectFileRows, deleteBlobKeys, rewriteBlobKeys, copyBlobKeys } from './blobops.js';
@@ -695,6 +695,7 @@ export async function serveFileContent(req, env, db, opts) {
     'Content-Disposition': disposition,
     'Accept-Ranges': 'bytes',
     'Access-Control-Allow-Origin': '*',
+    ...SEC_HEADERS,
   };
 
   const range = parseRange(req.headers.get('Range'), size);
@@ -938,6 +939,7 @@ export function zipStreamResponse(entries, filename) {
     headers: {
       'Content-Type': 'application/zip',
       'Content-Disposition': `attachment; filename="download.zip"; filename*=UTF-8''${encodeFilename(filename || 'download.zip')}`,
+      ...SEC_HEADERS,
     },
   });
 }
@@ -955,6 +957,8 @@ export async function batchDownload(req, env, db) {
     try { form = await req.formData(); } catch { return jerr('表单解析失败'); }
     const claims = await validateToken(String(form.get('token') || ''), env.JWT_SECRET).catch(() => null);
     if (!claims) return jerr('无效的令牌', 401);
+    // 表单通道同样要比对令牌版本, 否则改密码后它仍是旧 token 的后门
+    if (!(await checkTokenFresh(claims, db))) return jerr('令牌已失效，请重新登录', 401);
     try { paths = JSON.parse(form.get('paths') || '[]'); } catch { return jerr('无效的路径列表'); }
   }
   if (!Array.isArray(paths)) return jerr('无效的路径列表');

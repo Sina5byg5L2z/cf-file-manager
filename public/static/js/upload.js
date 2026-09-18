@@ -103,6 +103,14 @@ function _fmtSize(bytes) {
     return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
 }
 
+// 图床 (imagehost.js) 的待办数。该模块在 upload.js 之后加载、也可能整体不存在,
+// 统一走 window.ImageHost 探测 (imagehost.js 末尾显式挂载), 拿不到就当 0。
+// 悬浮入口是两处共用的, 所以角标 = 文件上传 + 图床 合计。
+function ihPending() {
+    const ih = window.ImageHost;
+    return (ih && typeof ih.pendingCount === 'function') ? (ih.pendingCount() || 0) : 0;
+}
+
 const Upload = {
     tasks: [],
     closeTimer: null,
@@ -110,6 +118,10 @@ const Upload = {
 
     // 供图床等模块复用的分片 hash (SHA-256 hex; 无 subtle 时返回 null = 跳过校验)
     hashChunk(blob) { return sha256Hex(blob); },
+
+    // 供图床等模块复用的文件指纹 (与文件上传同一算法: 名字|大小|修改时间|分片大小)。
+    // 两处必须同算法, 否则服务端 file_key 复用匹配不上。
+    fileKey(file, chunkSize) { return fileFingerprint(file, chunkSize); },
 
     // ---------------- 持久化 ----------------
     // 只存元数据: 文件内容不进 localStorage, 刷新后需用户重新选择同一文件
@@ -153,21 +165,79 @@ const Upload = {
         return this.tasks.some(t => !t.done);
     },
 
-    // 右下角悬浮入口按钮: 有待续传任务时显示
+    // 上传面板是否已展开 (面板开合只由 openPanel/closePanel 改内联 display)
+    isPanelOpen() {
+        const panel = document.getElementById('uploadProgress');
+        if (!panel) return false;
+        const d = panel.style.display;
+        return d !== 'none' && d !== '';
+    },
+
+    // 没传成功的任务数 = 文件上传 + 图床 (两者共用一个悬浮入口, 角标是合计)。
+    // 各自以内存任务为准; 页面刚加载、面板没展开过时内存为空, 用 localStorage 里的
+    // 待续传记录兜底, 否则刷新后入口按钮不显示。
+    pendingCount() {
+        const mem = this.tasks.filter(t => !t.done).length;
+        const filePending = mem > 0 ? mem : this.loadState().length;
+        return filePending + ihPending();
+    },
+
+    // 面板头部文案 (列表空了不能还写"上传中...")
+    setHeader(text) {
+        const panel = document.getElementById('uploadProgress');
+        const h = panel && panel.querySelector('.upload-progress-header > span');
+        if (h) h.textContent = text;
+    },
+
+    // 头文案跟随真实状态: 还有在传的 → 上传中; 只剩失败/暂停/待续传 → 待处理;
+    // 一条不剩 → 全部完成。(成功项会被摘掉, 所以"列表有内容"不等于"还在传")
+    refreshHeader() {
+        const active = this.tasks.some(t => !t.done && !t.failed && !t.paused && !t.needsFile);
+        if (active) this.setHeader('上传中...');
+        else if (this.hasPending()) this.setHeader('待处理');
+        else this.setHeader('全部完成');
+    },
+
+    // 右下角悬浮入口按钮: 只在「面板已收起」且「还有没传成功的文件」时显示。
+    // 面板展开时按钮必须隐藏 —— 否则两个入口同时出现, 按钮还压在面板上。
     updateLauncher() {
         const btn = document.getElementById('uploadLauncher');
+        this.renderIhEntry();
         if (!btn) return;
-        const pending = this.loadState().length;
-        if (pending > 0) {
+        const pending = this.pendingCount();
+        if (pending > 0 && !this.isPanelOpen()) {
             btn.style.display = 'flex';
             document.body.classList.add('has-upload-launcher');
             const badge = btn.querySelector('.upload-launcher-badge');
-            const active = this.tasks.filter(t => !t.done).length || pending;
-            if (badge) badge.textContent = String(active);
+            if (badge) badge.textContent = String(pending);
         } else {
             btn.style.display = 'none';
             document.body.classList.remove('has-upload-launcher');
         }
+    },
+
+    // 上传面板里的图床入口: 角标是"文件上传 + 图床"合计, 但本面板只列文件上传的任务,
+    // 不给出图床入口的话, 用户会看到"角标 2、列表里只有 1 条"的矛盾。
+    renderIhEntry() {
+        const panel = document.getElementById('uploadProgress');
+        if (!panel) return;
+        const n = ihPending();
+        const old = document.getElementById('uploadIhEntry');
+        if (!n) { if (old) old.remove(); return; }
+        let el = old;
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'uploadIhEntry';
+            el.className = 'upload-ih-entry';
+            el.title = '点击打开图床';
+            el.addEventListener('click', () => {
+                this.closePanel();                       // 先收上传面板, 两个浮层别叠着
+                if (window.ImageHost) window.ImageHost.show();
+            });
+            const list = document.getElementById('uploadList');
+            if (list) panel.insertBefore(el, list); else panel.appendChild(el);
+        }
+        el.textContent = `图床还有 ${n} 个未完成的上传，点此打开 ›`;
     },
 
     // ---------------- 打开 / 关闭面板 ----------------
@@ -178,14 +248,19 @@ const Upload = {
         if (this.closeTimer) { clearTimeout(this.closeTimer); this.closeTimer = null; }
         const bar = panel.querySelector('.auto-close-bar');
         if (bar) bar.style.display = 'none';
+        // 面板已展开 → 收起悬浮入口按钮
+        this.updateLauncher();
         // 恢复历史任务 (刷新后 localStorage 里还有的)
         this.restoreFromStorage();
+        this.refreshHeader();
     },
 
     closePanel() {
         const panel = document.getElementById('uploadProgress');
         if (panel) panel.style.display = 'none';
         if (this.closeTimer) { clearTimeout(this.closeTimer); this.closeTimer = null; }
+        // 面板收起后, 若还有没传成功的文件, 重新露出悬浮入口按钮
+        this.updateLauncher();
     },
 
     // 从 localStorage 恢复任务卡片 (无 File 句柄的标为"需重新选择文件")
@@ -233,6 +308,8 @@ const Upload = {
         if (this.closeTimer) { clearTimeout(this.closeTimer); this.closeTimer = null; }
         const bar = progress.querySelector('.auto-close-bar');
         if (bar) bar.style.display = 'none';
+        this.setHeader('上传中...');
+        this.updateLauncher();       // 面板展开 → 悬浮入口按钮隐藏
 
         for (const file of files) {
             // 必须 await + try/catch: addFile 内部会算指纹 (依赖 crypto.subtle),
@@ -288,6 +365,7 @@ const Upload = {
                 this.doUpload(task).catch((e2) => this.markTaskError(task, (e2 && e2.message) || '未知错误'));
             };
         }
+        this.refreshHeader();
     },
 
     async addFile(file, path, list) {
@@ -358,16 +436,25 @@ const Upload = {
         this.tasks = this.tasks.filter((t) => t !== task);
         if (el) el.remove();
         this.saveState();             // saveState 会把已移除的任务从 localStorage 去掉
-        this.updateLauncher();
-        // 面板里已无任务 → 自动收起
+        // 面板里已无任务 → 自动收起。先收面板再刷入口按钮: 反过来的话
+        // updateLauncher 会以为面板还开着, 把按钮一起藏掉。
         if (!this.hasPending()) {
             const panel = document.getElementById('uploadProgress');
             if (panel) panel.style.display = 'none';
         }
+        this.updateLauncher();
         // 清服务端会话与暂存分片 (失败不阻塞 UI: 24h 后定时任务也会回收)
         if (task.uploadId) {
             try { await API.uploadAbort(task.uploadId); } catch { /* 忽略 */ }
         }
+    },
+
+    // 上传成功的任务直接从列表和任务集合里摘掉: 列表里只保留"没传成功"的
+    // (失败 / 暂停 / 待续传), 用户看到的就是还需要处理的那几条。
+    dropDoneTask(task) {
+        const el = document.getElementById('upload-' + task.id);
+        if (el) el.remove();
+        this.tasks = this.tasks.filter((t) => t !== task);
     },
 
     // 刷新页面后恢复的任务: 无 File 句柄, 提示用户重新选择
@@ -427,6 +514,7 @@ const Upload = {
             status.textContent = task.progress + '%';
             this.doUpload(task);
         }
+        this.refreshHeader();
     },
 
     updateUI(task) {
@@ -503,6 +591,7 @@ const Upload = {
             //     必须让服务端告诉我们哪些分片已在 (否则会把整个文件重传一遍)
             if (!task.uploadId || task.needSync) {
                 status.textContent = '初始化...';
+                this.refreshHeader();
                 if (!task.fileKey && task.file) task.fileKey = await fileFingerprint(task.file, task.chunkSize);
                 const initRes = await API.uploadInit(task.path, task.name, task.totalChunks, {
                     fileKey: task.fileKey, fileSize: totalSize, chunkSize: task.chunkSize,
@@ -623,7 +712,10 @@ const Upload = {
             status.style.color = 'var(--color-success)';
             btn.style.display = 'none';
             FM.navigate(FM.currentPath);
-            this.saveState();          // 已完成的会从 localStorage 移除
+            // 传成功的文件不再占列表位置 → 立即摘掉卡片 (saveState 会把它从 localStorage 去掉)
+            this.dropDoneTask(task);
+            this.saveState();
+            this.refreshHeader();
             this.updateLauncher();
             this.scheduleAutoClose();
             // 后台生成缩略图并回传 (不阻塞 UI; 失败由网格懒生成兜底)
@@ -634,6 +726,7 @@ const Upload = {
             }).catch(() => {});
         } catch (e) {
             task.failed = true;
+            this.refreshHeader();
             status.textContent = '✗ ' + (e.message || '');
             status.style.color = 'var(--color-error)';
             status.title = e.message || '';
@@ -710,3 +803,7 @@ const Upload = {
         this.updateLauncher();
     }
 };
+
+// 顶层 const 不进 window —— imagehost.js 要通过 window.Upload 反过来刷新共用的
+// 悬浮入口按钮 (角标 = 文件上传 + 图床), 不挂载这里会静默失效。
+window.Upload = Upload;

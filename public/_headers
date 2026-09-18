@@ -1,3 +1,12 @@
+# 全站安全响应头 (静态资源)。API 响应由 Worker 侧的 util.SEC_HEADERS 负责。
+#   Referrer-Policy: no-referrer —— 不把当前 URL(含查询参数)经 Referer 传给第三方。
+#     注: Chrome 85+ 默认已是 strict-origin-when-cross-origin(跨域只发 origin), 显式声明是为了
+#     不依赖浏览器默认值, 并覆盖老浏览器/被改过默认值的环境。
+#   X-Content-Type-Options: nosniff —— 禁止按内容嗅探类型。
+/*
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+
 # Cloudflare Workers Static Assets 缓存规则 (wrangler deploy 时生效, _headers 本身不会作为静态文件发布)
 # fileicons.js 体积大 (~2.3MB) 但极少变更; 构建脚本 tools/build-fileicons.mjs 会在 HTML 引用上写 ?v=<内容hash>,
 # 内容变更 → URL 变化 → 缓存自动失效, 因此可放心 immutable 长缓存

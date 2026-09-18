@@ -3,7 +3,7 @@
 // 静态资源由 Workers Assets 直接命中(不进 Worker); 其余请求进入本路由
 // ============================================================================
 
-import { json, jerr } from './util.js';
+import { json, jerr, SEC_HEADERS } from './util.js';
 import * as auth from './auth.js';
 import * as vfs from './vfs.js';
 import * as ih from './imagehost.js';
@@ -19,10 +19,10 @@ import * as translate from './translate.js';
 export default {
   async fetch(request, env, ctx) {
     try {
-      return await route(request, env, ctx);
+      return harden(await route(request, env, ctx));
     } catch (e) {
       console.error('unhandled:', e && e.stack || e);
-      return jerr('服务器内部错误', 500);
+      return harden(jerr('服务器内部错误', 500));
     }
   },
 
@@ -63,10 +63,12 @@ async function route(request, env, ctx) {
 
   // ---------- 认证 ----------
   if (path === '/api/login' && method === 'POST') return auth.login(request, env, db);
-  if (path === '/api/me' && method === 'GET') return auth.me(request, env);
+  if (path === '/api/me' && method === 'GET') return auth.me(request, env, db);
 
   // ---------- 分享公开页 (无需登录) ----------
   const shareMatch = path.match(/^\/s\/([A-Za-z0-9]+)$/);
+  // 解锁: 用密码换短 TTL 的签名 Cookie, 之后子资源不再把密码放进 URL
+  if (shareMatch && method === 'POST') return share.unlockShare(request, env, db, shareMatch[1]);
   if (shareMatch && method === 'GET') {
     const url2 = new URL(request.url);
     // inline = 页内预览通道 (图片/视频/PDF 等), 必须回 inline 型 Content-Disposition,
@@ -97,12 +99,15 @@ async function route(request, env, ctx) {
   // ---------- 应用参数设置读取 (公开: 仅 UI 参数, 无敏感信息; 分享页未登录也要用) ----------
   if (path === '/api/settings' && method === 'GET') return settings.getSettings(request, env, db);
 
+  // ---------- 退出登录: 清只读 Cookie (HttpOnly, 前端删不掉) ----------
+  if (path === '/api/logout' && method === 'POST') return auth.logout(request, env);
+
   // ---------- 以下 API 均需 JWT ----------
   // 表单提交的打包下载无法携带 Authorization 头, 由 handler 校验表单 token 字段
   const isFormBatchDl = path === '/api/files/batch-download' && method === 'POST'
     && !(request.headers.get('Content-Type') || '').includes('application/json');
   if (!isFormBatchDl) {
-    const denied = await auth.checkAuth(request, env);
+    const denied = await auth.checkAuth(request, env, db);
     if (denied) return denied;
   }
 
@@ -173,6 +178,7 @@ async function route(request, env, ctx) {
   if (path === '/api/image-host/upload/status' && method === 'GET') return vfs.uploadStatus(request, env, db, url);
   if (path === '/api/image-host/upload/chunk' && method === 'POST') return vfs.uploadChunk(request, env, db); // 与文件分片共用
   if (path === '/api/image-host/upload/complete' && method === 'POST') return vfs.uploadComplete(request, env, db);
+  if (path === '/api/image-host/upload/abort' && method === 'POST') return vfs.uploadAbort(request, env, db); // 与文件上传共用(已按 kind 区分 'i:'/'f:')
   if (path === '/api/image-host/import' && method === 'POST') return ih.importFromFiles(request, env, db);
   if (path === '/api/image-host/list' && method === 'GET') return ih.list(request, env, db, url);
   const ihDel = path.match(/^\/api\/image-host\/(.+)$/);
@@ -184,4 +190,14 @@ async function route(request, env, ctx) {
 // 经 Assets 绑定取内部页面 (assets 目录下真实文件名)
 function assets(_req, env, assetPath) {
   return env.ASSETS.fetch(new Request('https://assets.internal' + assetPath));
+}
+
+// ---------------- 安全响应头 ----------------
+// 常量定义在 util.js(API 响应要用); 静态资源由 public/_headers 覆盖。
+// 这里再兜一层: 能就地改的就地改, 来自 fetch/ASSETS 的响应头不可变(会抛), 忽略即可。
+function harden(res) {
+  for (const k in SEC_HEADERS) {
+    try { if (!res.headers.has(k)) res.headers.set(k, SEC_HEADERS[k]); } catch { /* 响应头不可变 */ }
+  }
+  return res;
 }

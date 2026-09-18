@@ -296,7 +296,8 @@ img.thumb-icon.thumb-loading{animation:shimmer 1.2s linear infinite;background:l
 .file-row .meta{font-size:12px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
 
 /* === CONTEXT MENU === */
-.context-menu{position:fixed;min-width:180px;background:var(--bg-overlay);border:1px solid var(--border);border-radius:var(--radius-md);box-shadow:var(--shadow-lg);padding:4px 0;z-index:1000;animation:menuIn .1s ease}
+/* 右键菜单必须高于播放底栏(1150): 贴到页面底部时不能被底栏吃掉; 仍在 .dlg-overlay(1300) 之下 */
+.context-menu{position:fixed;min-width:180px;background:var(--bg-overlay);border:1px solid var(--border);border-radius:var(--radius-md);box-shadow:var(--shadow-lg);padding:4px 0;z-index:1250;animation:menuIn .1s ease}
 @keyframes menuIn{from{opacity:0;transform:scale(.96) translateY(-4px)}to{opacity:1;transform:scale(1) translateY(0)}}
 .context-item{display:flex;align-items:center;gap:10px;padding:7px 14px;font-size:13px;color:var(--text-primary);cursor:pointer;transition:background .08s}
 .context-item:hover{background:var(--accent-subtle)}
@@ -305,10 +306,12 @@ img.thumb-icon.thumb-loading{animation:shimmer 1.2s linear infinite;background:l
 .context-divider{height:1px;background:var(--divider);margin:4px 0}
 
 /* === UPLOAD === */
-.upload-overlay{position:fixed;inset:0;background:rgba(15,17,23,0.9);z-index:500;display:flex;align-items:center;justify-content:center}
+/* 拖拽上传蒙层是全屏遮罩, 必须盖住播放器底栏(1150)/歌词页(1160)/队列面板(1170), 否则拖文件时底栏浮在上面 */
+.upload-overlay{position:fixed;inset:0;background:rgba(15,17,23,0.9);z-index:1190;display:flex;align-items:center;justify-content:center}
 .upload-zone{border:3px dashed var(--accent);border-radius:16px;padding:60px 80px;text-align:center;color:var(--accent);font-size:18px}
 .upload-zone svg{margin-bottom:16px}
-.upload-progress{position:fixed;bottom:16px;right:16px;width:340px;background:var(--bg-overlay);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-lg);z-index:200;max-height:280px;overflow-y:auto}
+/* 上传面板/入口都钉在右下角, 和播放底栏位置重叠: 底栏可见时一并上抬(见 --mp-bar-h) */
+.upload-progress{position:fixed;bottom:calc(var(--mp-bar-h, 0px) + 16px);right:16px;width:340px;background:var(--bg-overlay);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-lg);z-index:200;max-height:280px;overflow-y:auto}
 .upload-progress-header{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600}
 .upload-list{padding:8px}
 .upload-item{padding:6px 0;font-size:12px}
@@ -323,17 +326,22 @@ img.thumb-icon.thumb-loading{animation:shimmer 1.2s linear infinite;background:l
 .upload-del-btn:hover{background:var(--color-error);border-color:var(--color-error);color:#fff}
 .auto-close-bar{height:3px;background:var(--bg-raised);overflow:hidden}
 .auto-close-bar-fill{height:100%;background:var(--color-success);width:100%}
+/* 上传面板里的图床跳转入口: 悬浮入口角标是「文件上传 + 图床」合计, 而本面板只列
+   文件上传的任务 —— 不给入口的话用户会看到"角标 2、列表里只有 1 条"的矛盾 */
+.upload-ih-entry{margin:8px 8px 0;padding:8px 10px;font-size:12px;color:var(--text-secondary);background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;transition:background .15s,color .15s}
+.upload-ih-entry:hover{background:var(--bg-overlay);color:var(--text-primary)}
 
 /* 未完成上传的右下角悬浮入口 (仅存在未完成任务时显示) */
-.upload-launcher{position:fixed;bottom:16px;right:16px;z-index:210;display:flex;align-items:center;justify-content:center;width:52px;height:52px;padding:0;border:none;border-radius:50%;cursor:pointer;background:var(--accent);color:#fff;box-shadow:var(--shadow-lg);transition:transform .15s ease,filter .15s ease}
+.upload-launcher{position:fixed;bottom:calc(var(--mp-bar-h, 0px) + 16px);right:16px;z-index:210;display:flex;align-items:center;justify-content:center;width:52px;height:52px;padding:0;border:none;border-radius:50%;cursor:pointer;background:var(--accent);color:#fff;box-shadow:var(--shadow-lg);transition:transform .15s ease,filter .15s ease}
 .upload-launcher:hover{transform:scale(1.06);filter:brightness(1.08)}
 .upload-launcher:active{transform:scale(.96)}
 .upload-launcher-badge{position:absolute;top:-4px;right:-4px;min-width:20px;height:20px;padding:0 5px;border-radius:10px;background:var(--color-error);color:#fff;font-size:11px;font-weight:700;line-height:20px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.35)}
-/* 入口按钮可见时, 上传面板上移让位, 避免遮挡 */
-body.has-upload-launcher .upload-progress{bottom:80px}
+/* 入口按钮可见时, 上传面板上移让位, 避免遮挡(同样要让开播放底栏) */
+body.has-upload-launcher .upload-progress{bottom:calc(var(--mp-bar-h, 0px) + 80px)}
 
 /* === MODALS === */
-.modal-overlay{position:fixed;inset:0;background:rgba(15,17,23,0.9);z-index:600;display:flex;align-items:center;justify-content:center}
+/* 弹窗遮罩同理: 必须高于播放器底栏/歌词页/队列面板, 否则弹窗底部的按钮被底栏压住; 仍在 .dlg-overlay(1300) 之下 */
+.modal-overlay{position:fixed;inset:0;background:rgba(15,17,23,0.9);z-index:1180;display:flex;align-items:center;justify-content:center}
 .modal{background:var(--bg-surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow-lg);max-height:80vh;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
 .modal-header{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;border-bottom:1px solid var(--border);font-weight:600;font-size:15px;position:sticky;top:0;background:var(--bg-surface);z-index:2}
 .modal-close{background:none;border:none;color:var(--text-tertiary);font-size:18px;cursor:pointer;padding:4px;transition:color .1s}
@@ -489,6 +497,8 @@ body.has-upload-launcher .upload-progress{bottom:80px}
 .ih-upload-name{flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ih-upload-status{font-size:12px;color:var(--text-secondary);min-width:40px;text-align:right}
 .ih-upload-pause-btn{font-size:11px;padding:1px 6px}
+.ih-upload-del-btn{font-size:11px;padding:1px 6px;flex:0 0 auto}
+.ih-upload-del-btn:hover{background:var(--color-error);border-color:var(--color-error);color:#fff}
 .ih-upload-bar{height:4px;background:var(--bg-raised);border-radius:2px;overflow:hidden;margin:4px 0}
 .ih-upload-bar-fill{height:100%;background:var(--accent);border-radius:2px;transition:width .15s;width:0}
 .ih-upload-detail{font-size:11px;color:var(--text-tertiary)}
@@ -627,6 +637,18 @@ body.has-upload-launcher .upload-progress{bottom:80px}
 .st-banner-close { flex: none; border: 0; background: transparent; color: #fff; font-size: 14px; cursor: pointer; line-height: 1; }
 
 /* ===== 全局音乐播放器 ===== */
+/* 底栏是固定定位, 脱离文档流不占位, 会压住页面底部内容。
+   JS(musicplayer.js / sharemusic.js) 把底栏实际高度写进 --mp-bar-h, 并在 body 末尾挂一个
+   .mp-dock 占位块。为什么用占位块而不是 body{padding-bottom}: 实测(Cr/1280x560)
+   - 管理页 body 是 height:100vh + overflow:hidden 的 flex 列 → 占位块是 flex 项, 直接挤掉
+     .file-area 的等高空间;
+   - 分享页 body 自己就是 100vh 的滚动容器(style.css 给了 height:100vh, share.html 又给了
+     overflow:auto) → 此时 body 的 padding-bottom 不进入可滚动区域(实测仍被压 41px), 而占位块
+     作为末尾内容能真实撑高滚动范围。
+   底栏换行/加高由 ResizeObserver 重算, 不是一次性快照。
+   body.mp-on 只是"底栏可见"的状态钩子(JS 维护), 目前无样式规则, 留作后续按状态改页面用。 */
+:root { --mp-bar-h: 0px; }
+.mp-dock { flex: none; width: 100%; height: var(--mp-bar-h, 0px); pointer-events: none; }
 .mp-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 1150; display: flex; align-items: center; gap: 20px; padding: 10px 20px; background: var(--bg-surface); border-top: 1px solid var(--border); }
 .mp-bar-left { display: flex; align-items: center; gap: 12px; min-width: 0; width: 260px; }
 .mp-cover { width: 44px; height: 44px; flex: none; border-radius: 8px; background-color: var(--bg-highlight); background-position: center; background-size: cover; background-repeat: no-repeat; }
@@ -677,7 +699,7 @@ body.has-upload-launcher .upload-progress{bottom:80px}
 .mp-offset { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding-top: 12px; margin-top: 10px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); }
 .mp-ofs-gap { flex: 1 1 12px; }
 
-.mp-panel { position: fixed; right: 20px; bottom: 70px; z-index: 1170; width: 340px; max-height: 60vh; overflow-y: auto; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+.mp-panel { position: fixed; right: 20px; bottom: calc(var(--mp-bar-h, 65px) + 8px); z-index: 1170; width: 340px; max-height: 60vh; overflow-y: auto; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
 .mp-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; font-size: 13px; font-weight: 500; color: var(--text-primary); border-bottom: 1px solid var(--border); }
 .mp-clear { flex: none; padding: 2px 10px; font-size: 12px; color: var(--color-error); border-color: var(--color-error); }
 .mp-clear:hover { background: rgba(248,81,73,0.15); }

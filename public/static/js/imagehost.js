@@ -2,6 +2,10 @@
 const IH_CHUNK_SIZE = 512 * 1024; // 512KB
 const IH_CONCURRENT = 4; // 与 upload.js 一致; 8 曾实测触发免费版 CPU 超限(1102)
 
+// 未完成的图床上传任务 (只存元数据, 不含文件内容) —— 刷新/关页面后据此恢复"待继续"。
+// 与文件上传的 uploadTasks 分开存, 两者互不干扰。
+const IH_STORE_KEY = 'ihUploadTasks';
+
 const ImageHost = (function() {
     let currentPage = 1;
     let pageSize = 24;
@@ -33,6 +37,7 @@ const ImageHost = (function() {
     return {
         show: function() {
             this.createModal();
+            this.restoreFromStorage();
             this.loadPage(1);
         },
 
@@ -40,6 +45,7 @@ const ImageHost = (function() {
             let overlay = document.getElementById('ihOverlay');
             if (overlay) {
                 overlay.style.display = 'flex';
+                this.restoreFromStorage();
                 this.loadPage(1);
                 return;
             }
@@ -205,62 +211,299 @@ const ImageHost = (function() {
         },
 
         // ===== Chunked Upload =====
+        // 与 upload.js 同一套协议: 算 file_key 指纹 → 服务端命中未完成会话则复用, 只补缺失分片。
+        // 关键差异: 任务与 File 句柄解耦 —— 句柄只活在内存里, 元数据落 localStorage。
+        // 刷新/关页面后任务是"待继续"状态, 重选同一个文件就能接着传 (不是从头传)。
         handleFiles: function(fileList) {
             const listEl = document.getElementById('ihUploadList');
+            if (!listEl) return;
             listEl.style.display = 'block';
-            uploadTasks = [];
-
+            this.syncListDom();          // 不清空已有任务: 命中同源文件就复用, 其余保留
             for (const file of fileList) {
-                const id = Date.now() + Math.random();
-                const totalChunks = Math.max(1, Math.ceil(file.size / IH_CHUNK_SIZE));
-                const task = { id, name: file.name, file, progress: 0, paused: false, aborted: false, uploadId: null, totalChunks, sentChunks: 0, received: null, inflight: null, result: null, chunkSize: IH_CHUNK_SIZE, concurrent: IH_CONCURRENT, timeoutRetries: 0 };
-                uploadTasks.push(task);
+                // 必须 await + catch: addFile 里要算指纹 (依赖 crypto.subtle),
+                // 一旦抛错没人接, 任务既不在列表里也无提示, 用户只看到"点了没反应"
+                this.addFile(file, listEl, fileList.length).catch((e) => this.markFailed(file, e));
+            }
+        },
+
+        async addFile(file, list, batchSize) {
+            const totalChunks = Math.max(1, Math.ceil(file.size / IH_CHUNK_SIZE));
+            const fileKey = await Upload.fileKey(file, IH_CHUNK_SIZE);
+
+            // 同一文件 (同名+同大小+同修改时间+同分片大小) 已有未完成任务 → 复用, 只补缺失分片
+            const dup = uploadTasks.find((t) => !t.done && t.fileKey === fileKey && t.name === file.name);
+            if (dup) {
+                dup.file = file;            // 补上新句柄
+                dup.needsFile = false;
+                dup.paused = false;
+                dup.failed = false;
+                dup.batchSize = batchSize;
+                this.renderUploadItem(list, dup);
+                this.doChunkedUpload(dup).catch((e) => this.markTaskError(dup, e));
+                return;
+            }
+
+            const task = {
+                id: Date.now() + Math.random(), name: file.name, file,
+                size: file.size, lastModified: file.lastModified || 0,
+                progress: 0, paused: false, aborted: false, uploadId: null,
+                totalChunks, sentChunks: 0, received: null, inflight: null, hashes: {},
+                result: null, chunkSize: IH_CHUNK_SIZE, concurrent: IH_CONCURRENT,
+                timeoutRetries: 0, fileKey, needsFile: false, failed: false, done: false,
+                batchSize: batchSize || 1,
+            };
+            uploadTasks.push(task);
+            this.renderUploadItem(list, task);
+            this.doChunkedUpload(task).catch((e) => this.markTaskError(task, e));
+        },
+
+        // 任务创建阶段就失败 (指纹计算/编码等) → 也要留一条可见记录
+        markFailed: function(file, e) {
+            const listEl = document.getElementById('ihUploadList');
+            const task = {
+                id: Date.now() + Math.random(), name: file.name, file,
+                size: file.size, lastModified: file.lastModified || 0,
+                progress: 0, paused: true, aborted: false, uploadId: null,
+                totalChunks: 0, sentChunks: 0, received: null, inflight: null, hashes: {},
+                result: null, chunkSize: 0, concurrent: 1, timeoutRetries: 0,
+                fileKey: '', needsFile: false, failed: true, done: false, batchSize: 1,
+            };
+            uploadTasks.push(task);
+            if (listEl) {
                 this.renderUploadItem(listEl, task);
-                // 补一层 catch 保险: 异常必须可见, 不能静默消失
-                this.doChunkedUpload(task).catch((e) => {
-                    const el = document.getElementById('ih-upload-' + task.id);
-                    if (!el) return;
-                    const status = el.querySelector('.ih-upload-status');
-                    if (status) {
-                        status.textContent = '✗ ' + ((e && e.message) || '');
-                        status.style.color = 'var(--color-error)';
-                    }
-                });
+                this.markTaskError(task, e);
+            }
+            this.saveState();
+            this.refreshHeader();
+        },
+
+        // 把卡片切到"✗ 原因 + 重试"
+        markTaskError: function(task, e) {
+            const el = document.getElementById('ih-upload-' + task.id);
+            if (!el) return;
+            const msg = (e && e.message) || '未知错误';
+            const status = el.querySelector('.ih-upload-status');
+            const btn = el.querySelector('.ih-upload-pause-btn');
+            if (status) {
+                status.textContent = '✗ ' + msg;
+                status.style.color = 'var(--color-error)';
+                status.title = msg;
+            }
+            if (btn) {
+                btn.textContent = '重试';
+                btn.style.display = '';
+                btn.onclick = () => {
+                    task.failed = false;
+                    task.paused = false;
+                    if (status) { status.style.color = ''; status.textContent = task.progress + '%'; }
+                    btn.textContent = '暂停';
+                    btn.onclick = () => this.togglePause(task.id);
+                    this.refreshHeader();
+                    this.doChunkedUpload(task).catch((e2) => this.markTaskError(task, e2));
+                };
+            }
+            this.refreshHeader();
+        },
+
+        // 传成功的任务直接从列表与任务集合摘掉: 列表里只留"没传成功"的
+        // (失败 / 暂停 / 待续传), 用户看到的就是还需要处理的那几条。
+        dropDoneTask: function(task) {
+            const el = document.getElementById('ih-upload-' + task.id);
+            if (el) el.remove();
+            uploadTasks = uploadTasks.filter((t) => t !== task);
+        },
+
+        // 删除未完成任务: 停止上传 + 清服务端暂存分片与会话 + 从列表/本地记录移除
+        removeTask: async function(task) {
+            const el = document.getElementById('ih-upload-' + task.id);
+            const ok = await Dialog.confirm(
+                `删除未完成的上传「${task.name}」？\n已上传的临时分片会一并清除，之后需要重传。`,
+                { title: '删除上传任务', okText: '删除', danger: true },
+            ).catch(() => false);
+            if (!ok) return;
+
+            task.aborted = true;          // 让正在跑的 while 循环尽快退出
+            task.paused = true;
+            uploadTasks = uploadTasks.filter((t) => t !== task);
+            if (el) el.remove();
+            this.saveState();
+            this.refreshHeader();
+            // 清服务端会话与暂存分片 (失败不阻塞 UI: 24h 后定时任务也会回收)
+            if (task.uploadId) {
+                try { await API.ihUploadAbort(task.uploadId); } catch { /* 忽略 */ }
             }
         },
 
         renderUploadItem: function(list, task) {
-            // 如果是第一个上传项，添加标题和折叠按钮
-            if (list.children.length === 0) {
-                const header = document.createElement('div');
-                header.className = 'ih-upload-header';
-                header.innerHTML = `
-                    <span class="ih-upload-header-text">上传进度 (${list.children.length + 1})</span>
-                    <span class="ih-upload-header-toggle">▼</span>
-                `;
-                header.addEventListener('click', () => this.toggleUploadList());
-                list.appendChild(header);
-            } else {
-                // 更新标题中的计数
-                const header = list.querySelector('.ih-upload-header-text');
-                if (header) {
-                    header.textContent = `上传进度 (${list.children.length})`;
-                }
-            }
-
+            const old = document.getElementById('ih-upload-' + task.id);
+            if (old) old.remove();       // 重绘 (如恢复后重新选文件) 不能留旧卡片
             const div = document.createElement('div');
             div.className = 'ih-upload-item';
             div.id = 'ih-upload-' + task.id;
             div.innerHTML = `
                 <div class="ih-upload-row">
                     <span class="ih-upload-name" title="${esc(task.name)}">${esc(task.name)}</span>
-                    <span class="ih-upload-status">0%</span>
-                    <button class="btn btn-xs ih-upload-pause-btn" onclick="ImageHost.togglePause(${task.id})">暂停</button>
+                    <span class="ih-upload-status">${task.progress}%</span>
+                    <button class="btn btn-xs ih-upload-pause-btn">暂停</button>
+                    <button class="btn btn-xs ih-upload-del-btn" title="从列表移除并丢弃已上传分片">删除</button>
                 </div>
-                <div class="ih-upload-bar"><div class="ih-upload-bar-fill" style="width:0%"></div></div>
-                <div class="ih-upload-detail">0/${task.totalChunks} 分片 (0/${formatSize(task.file.size)})</div>
+                <div class="ih-upload-bar"><div class="ih-upload-bar-fill" style="width:${task.progress}%"></div></div>
+                <div class="ih-upload-detail"></div>
             `;
+            // 用 onclick 属性而非 addEventListener: 后面 markNeedsFile/markTaskError
+            // 要靠覆盖 onclick 换按钮语义, 监听器形式的旧回调是摘不掉的。
+            const pauseBtn = div.querySelector('.ih-upload-pause-btn');
+            pauseBtn.onclick = () => this.togglePause(task.id);
+            div.querySelector('.ih-upload-del-btn').onclick = () => this.removeTask(task);
             list.appendChild(div);
+            this.updateUploadUI(task);
+            this.refreshHeader();
+        },
+
+        // 列表 DOM 与 uploadTasks 对齐: 摘掉任务集合里已不存在的卡片 (防残留/计数错乱)
+        syncListDom: function() {
+            const listEl = document.getElementById('ihUploadList');
+            if (!listEl) return;
+            for (const el of [...listEl.querySelectorAll('.ih-upload-item')]) {
+                const id = el.id.replace('ih-upload-', '');
+                if (!uploadTasks.some((t) => String(t.id) === id)) el.remove();
+            }
+        },
+
+        // 列表头文案跟随真实状态; 一条未完成任务都不剩时整块收起并清空
+        refreshHeader: function() {
+            const listEl = document.getElementById('ihUploadList');
+            if (!listEl) return;
+            const pending = uploadTasks.filter((t) => !t.done);
+            if (!pending.length) {
+                listEl.style.display = 'none';
+                listEl.innerHTML = '';
+                return;
+            }
+            listEl.style.display = 'block';
+            let header = listEl.querySelector('.ih-upload-header');
+            if (!header) {
+                header = document.createElement('div');
+                header.className = 'ih-upload-header';
+                header.innerHTML = '<span class="ih-upload-header-text"></span><span class="ih-upload-header-toggle">▼</span>';
+                header.addEventListener('click', () => this.toggleUploadList());
+                listEl.insertBefore(header, listEl.firstChild);
+            }
+            const active = pending.some((t) => !t.failed && !t.paused && !t.needsFile);
+            const text = header.querySelector('.ih-upload-header-text');
+            if (text) text.textContent = (active ? '上传中... ' : '待处理 ') + `(${pending.length})`;
+        },
+
+        // ---------------- 持久化 (只存元数据, 文件内容不进 localStorage) ----------------
+        saveState: function() {
+            try {
+                const snap = uploadTasks.filter((t) => !t.done).map((t) => ({
+                    id: t.id, name: t.name, size: t.size, lastModified: t.lastModified,
+                    uploadId: t.uploadId, totalChunks: t.totalChunks, sentChunks: t.sentChunks,
+                    chunkSize: t.chunkSize, concurrent: t.concurrent, fileKey: t.fileKey,
+                    needsFile: !t.file, failed: !!t.failed, paused: !!t.paused,
+                }));
+                localStorage.setItem(IH_STORE_KEY, JSON.stringify(snap));
+            } catch (e) { /* 隐私模式 / 超额 → 忽略 */ }
+            this.notifyLauncher();
+        },
+
+        loadState: function() {
+            try {
+                const raw = localStorage.getItem(IH_STORE_KEY);
+                return raw ? JSON.parse(raw) : [];
+            } catch { return []; }
+        },
+
+        clearState: function() {
+            try { localStorage.removeItem(IH_STORE_KEY); } catch { /* noop */ }
+            this.notifyLauncher();
+        },
+
+        // 未完成任务数 (悬浮入口角标要用): 以内存任务为准, 页面刚加载、面板没展开过时
+        // 内存为空 → 用本地记录兜底, 否则刷新后入口按钮不显示。
+        pendingCount: function() {
+            const mem = uploadTasks.filter((t) => !t.done).length;
+            return mem > 0 ? mem : this.loadState().length;
+        },
+
+        // 图床任务变化要刷新共用的悬浮入口按钮 (角标 = 文件上传 + 图床)。
+        // window.Upload 是 upload.js 末尾显式挂载的; 兜底再试全局 Upload,
+        // 少一处挂载也不至于让按钮永远不刷新。
+        notifyLauncher: function() {
+            const U = window.Upload || (typeof Upload !== 'undefined' ? Upload : null);
+            if (U && typeof U.updateLauncher === 'function') U.updateLauncher();
+        },
+
+        // 从 localStorage 恢复未完成任务卡片 (无 File 句柄 → 标"待继续", 等用户重选文件)
+        restoreFromStorage: function() {
+            const listEl = document.getElementById('ihUploadList');
+            if (!listEl) return;
+            for (const s of this.loadState()) {
+                if (uploadTasks.some((t) => String(t.id) === String(s.id))) continue;
+                const task = {
+                    id: s.id, name: s.name, file: null, size: s.size, lastModified: s.lastModified,
+                    progress: Math.round((s.sentChunks / Math.max(1, s.totalChunks)) * 100),
+                    paused: true, aborted: false, uploadId: s.uploadId,
+                    totalChunks: s.totalChunks, sentChunks: s.sentChunks,
+                    chunkSize: s.chunkSize || IH_CHUNK_SIZE, concurrent: s.concurrent || IH_CONCURRENT,
+                    timeoutRetries: 0, fileKey: s.fileKey || '', needsFile: true,
+                    failed: !!s.failed, done: false, batchSize: 0,
+                    received: null, inflight: null, hashes: {}, result: null,
+                };
+                uploadTasks.push(task);
+                this.renderUploadItem(listEl, task);
+                this.markNeedsFile(task);
+            }
+            this.syncListDom();
+            this.refreshHeader();
+            this.notifyLauncher();
+        },
+
+        // 恢复的任务: 无 File 句柄, 按钮变"选择文件"
+        markNeedsFile: function(task) {
+            const el = document.getElementById('ih-upload-' + task.id);
+            if (!el) return;
+            const status = el.querySelector('.ih-upload-status');
+            const btn = el.querySelector('.ih-upload-pause-btn');
+            if (status) {
+                status.textContent = '待继续';
+                status.title = '需要重新选择同一文件以继续上传';
+            }
+            if (btn) {
+                btn.textContent = '选择文件';
+                btn.onclick = () => this.pickFileFor(task);
+            }
+        },
+
+        // 为恢复的任务重新指定文件 (必须选同一个文件, 否则与已传分片对不上)
+        pickFileFor: function(task) {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.multiple = false;
+            input.accept = 'image/*,video/*,audio/*,.pdf';
+            input.onchange = () => {
+                const f = input.files && input.files[0];
+                if (!f) return;
+                if (f.name !== task.name || f.size !== (task.size || 0)) {
+                    Dialog.alert(`请选择原文件「${task.name}」(${formatSize(task.size)})，当前选择不匹配。`, { title: '文件不匹配' });
+                    return;
+                }
+                task.file = f;
+                task.needsFile = false;
+                task.paused = false;
+                task.failed = false;
+                // 关键: 恢复的任务带着旧 uploadId, 但本地 received 没持久化。
+                // 必须强制重新 init 一次, 让服务端告诉我们已收哪些分片,
+                // 否则会把整个文件重传一遍 (file_key 命中会话 → 服务端回 resumed+received)。
+                task.needSync = true;
+                const el = document.getElementById('ih-upload-' + task.id);
+                const btn = el && el.querySelector('.ih-upload-pause-btn');
+                if (btn) { btn.textContent = '暂停'; btn.onclick = () => this.togglePause(task.id); }
+                this.refreshHeader();
+                this.doChunkedUpload(task).catch((e) => this.markTaskError(task, e));
+            };
+            input.click();
         },
 
         toggleUploadList: function() {
@@ -275,8 +518,9 @@ const ImageHost = (function() {
         },
 
         togglePause: function(id) {
-            const task = uploadTasks.find(t => t.id === id);
+            const task = uploadTasks.find(t => String(t.id) === String(id));
             if (!task) return;
+            if (task.needsFile) { this.pickFileFor(task); return; }
             task.paused = !task.paused;
             const el = document.getElementById('ih-upload-' + id);
             if (!el) return;
@@ -285,20 +529,24 @@ const ImageHost = (function() {
             if (task.paused) {
                 btn.textContent = '继续';
                 status.textContent = '已暂停';
+                this.saveState();
             } else {
                 btn.textContent = '暂停';
                 status.textContent = task.progress + '%';
-                this.doChunkedUpload(task);
+                this.doChunkedUpload(task).catch((e) => this.markTaskError(task, e));
             }
+            this.refreshHeader();
         },
 
         updateUploadUI: function(task) {
             const el = document.getElementById('ih-upload-' + task.id);
             if (!el) return;
+            // 恢复的任务没有 file 句柄, 总量只能读持久化的 size
+            const total = task.size || (task.file && task.file.size) || 0;
             el.querySelector('.ih-upload-bar-fill').style.width = task.progress + '%';
             el.querySelector('.ih-upload-status').textContent = task.progress + '%';
-            const uploaded = Math.min(task.sentChunks * task.chunkSize, task.file.size);
-            el.querySelector('.ih-upload-detail').textContent = `${task.sentChunks}/${task.totalChunks} 分片 (${formatSize(uploaded)}/${formatSize(task.file.size)})`;
+            const uploaded = Math.min(task.sentChunks * task.chunkSize, total);
+            el.querySelector('.ih-upload-detail').textContent = `${task.sentChunks}/${task.totalChunks} 分片 (${formatSize(uploaded)}/${formatSize(total)})`;
         },
 
         // Check if error is timeout-related
@@ -331,22 +579,49 @@ const ImageHost = (function() {
             const btn = el.querySelector('.ih-upload-pause-btn');
 
             try {
-                // Step 1: Init
-                if (!task.uploadId) {
-                    const uploaded = Math.min(task.sentChunks * task.chunkSize, task.file.size);
-                    status.textContent = `${task.sentChunks}/${task.totalChunks} 分片 (${formatSize(uploaded)}/${formatSize(task.file.size)})`;
+                const totalSize = task.size || (task.file && task.file.size) || 0;
+
+                // 统一兜底: 任务对象可能来自 localStorage 恢复或 markFailed, 那两条路径
+                // 不构造 received/inflight/hashes (缺 hashes 时 uploadOne 里赋值会抛错)
+                if (!task.received) task.received = new Array(task.totalChunks).fill(false);
+                if (!task.inflight) task.inflight = new Set();
+                if (!task.hashes) task.hashes = {};
+
+                // Step 1: Init (带 file_key; 服务端命中未完成会话则返回已传分片)
+                // 两种情况都必须走一次:
+                //   - 没有 uploadId: 全新任务
+                //   - task.needSync: 从 localStorage 恢复后重选了文件, 本地 received 不可信,
+                //     必须让服务端告诉我们已收哪些分片, 否则会把整个文件重传一遍
+                if (!task.uploadId || task.needSync) {
+                    const uploaded = Math.min(task.sentChunks * task.chunkSize, totalSize);
+                    status.textContent = `${task.sentChunks}/${task.totalChunks} 分片 (${formatSize(uploaded)}/${formatSize(totalSize)})`;
+                    if (!task.fileKey && task.file) task.fileKey = await Upload.fileKey(task.file, task.chunkSize);
                     const initRes = await API.ihUploadInit(task.name, task.totalChunks, {
-                        fileSize: task.file.size, chunkSize: task.chunkSize,
+                        fileSize: totalSize, chunkSize: task.chunkSize, fileKey: task.fileKey,
                     });
+                    const oldUploadId = task.uploadId;
                     task.uploadId = initRes.upload_id;
-                    // 服务端已有分片 (同页面重试场景) → 跳过已传
-                    if (!task.received) task.received = new Array(task.totalChunks).fill(false);
-                    if (Array.isArray(initRes.received) && initRes.received.length) {
-                        for (const i of initRes.received) if (i >= 0 && i < task.totalChunks) task.received[i] = true;
-                        task.sentChunks = task.received.filter(Boolean).length;
-                        task.progress = Math.round((task.sentChunks / task.totalChunks) * 100);
-                        this.updateUploadUI(task);
+                    task.needSync = false;
+                    // 服务端换了会话 (旧会话已被回收/参数变了) → 本地进度作废
+                    if (oldUploadId && oldUploadId !== task.uploadId) {
+                        task.received = new Array(task.totalChunks).fill(false);
+                        task.hashes = {};
+                        task.inflight = new Set();
                     }
+                    // 以服务端返回的分片清单为准重建进度
+                    const got = new Set(Array.isArray(initRes.received) ? initRes.received : []);
+                    for (const i of got) if (i >= 0 && i < task.totalChunks) task.received[i] = true;
+                    // 服务端回传的分片 hash → 本地缓存, 避免重算
+                    if (Array.isArray(initRes.hashes)) for (const { idx, hash } of initRes.hashes) {
+                        if (idx >= 0 && idx < task.totalChunks && hash) task.hashes[idx] = hash;
+                    }
+                    task.sentChunks = task.received.filter(Boolean).length;
+                    task.progress = Math.round((task.sentChunks / task.totalChunks) * 100);
+                    if (initRes.resumed && task.sentChunks > 0) {
+                        status.textContent = `续传 (已有 ${task.sentChunks}/${task.totalChunks} 片)`;
+                    }
+                    this.updateUploadUI(task);
+                    this.saveState();
                 }
 
                 if (!task.received) task.received = new Array(task.totalChunks).fill(false);
@@ -354,15 +629,18 @@ const ImageHost = (function() {
 
                 const uploadOne = async (idx) => {
                     const start = idx * task.chunkSize;
-                    const end = Math.min(start + task.chunkSize, task.file.size);
+                    const end = Math.min(start + task.chunkSize, totalSize);
                     const chunk = task.file.slice(start, end);
                     // 分片 hash 可选: 无 crypto.subtle 时 hashChunk 返回 null, 跳过校验
-                    const h = await Upload.hashChunk(chunk);
+                    let h = task.hashes[idx] || null;
+                    if (!h && task.chunkSize <= 2 * 1024 * 1024) h = await Upload.hashChunk(chunk);
                     await API.ihUploadChunk(task.uploadId, idx, chunk, h);
+                    if (h) task.hashes[idx] = h;
                     task.received[idx] = true;
                     task.sentChunks = task.received.filter(Boolean).length;
                     task.progress = Math.round((task.sentChunks / task.totalChunks) * 100);
                     this.updateUploadUI(task);
+                    this.saveState();       // 每片落库即持久化进度, 崩溃/关页面后可续
                 };
 
                 while (true) {
@@ -431,54 +709,23 @@ const ImageHost = (function() {
                 status.textContent = '✓';
                 status.style.color = 'var(--color-success)';
                 btn.style.display = 'none';
+                task.done = true;
+                task.progress = 100;
 
+                // 传成功的不再占列表位置: 摘卡片 + 出任务集合 + 从本地记录移除
+                this.dropDoneTask(task);
+                this.saveState();
+                this.refreshHeader();
                 this.loadPage(currentPage);
-                this.autoHideUploadList();
 
-                // Show embed dialog for single file
-                if (uploadTasks.length === 1 && task.result) {
+                // 本次只选了这一个文件 → 直接给嵌入代码 (图床的主要用途就是拿直链)
+                if (task.batchSize === 1 && task.result) {
                     this.showEmbedDialog(task.result);
                 }
             } catch (e) {
-                status.textContent = '✗ ' + (e.message || '');
-                status.style.color = 'var(--color-error)';
-                btn.textContent = '重试';
-                btn.style.display = '';
-                btn.onclick = () => {
-                    task.paused = false;
-                    task.progress = Math.round((task.sentChunks / task.totalChunks) * 100);
-                    status.style.color = '';
-                    status.textContent = task.progress + '%';
-                    btn.textContent = '暂停';
-                    btn.onclick = () => ImageHost.togglePause(task.id);
-                    this.doChunkedUpload(task).catch(() => {});
-                };
-            }
-        },
-
-        autoHideUploadList: function() {
-            const allDone = uploadTasks.every(t => {
-                const el = document.getElementById('ih-upload-' + t.id);
-                const s = el ? el.querySelector('.ih-upload-status') : null;
-                return s && (s.textContent === '✓' || s.textContent.startsWith('✗'));
-            });
-            if (allDone) {
-                setTimeout(() => {
-                    const listEl = document.getElementById('ihUploadList');
-                    if (listEl) { listEl.style.display = 'none'; listEl.innerHTML = ''; }
-                    uploadTasks = [];
-                }, 5000);
-            } else {
-                // 更新进行中的计数
-                const pendingCount = uploadTasks.filter(t => {
-                    const el = document.getElementById('ih-upload-' + t.id);
-                    const s = el ? el.querySelector('.ih-upload-status') : null;
-                    return s && s.textContent !== '✓' && !s.textContent.startsWith('✗');
-                }).length;
-                const header = document.querySelector('.ih-upload-header-text');
-                if (header) {
-                    header.textContent = `上传进度 (${pendingCount})`;
-                }
+                task.failed = true;
+                this.markTaskError(task, e);
+                this.saveState();   // 失败态也持久化, 刷新后仍可重试
             }
         },
 
@@ -605,3 +852,7 @@ const ImageHost = (function() {
         },
     };
 })();
+
+// 顶层 const 不进 window —— upload.js 的悬浮入口角标要读图床待办数 (window.ImageHost),
+// 分享页等其它脚本也可能引用, 必须显式挂载。
+window.ImageHost = ImageHost;

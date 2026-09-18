@@ -60,6 +60,9 @@ const API = {
 
     // Auth
     login(username, password) { return this.json('POST', '/api/login', { username, password }); },
+    // 退出登录: 除了清本地的 token, 还必须让服务端把只读 Cookie (HttpOnly) 置为过期,
+    // 否则退出后直接访问 /api/preview?path=... 仍能拿到文件。
+    logout() { return this.json('POST', '/api/logout', {}); },
     me() { return this.json('GET', '/api/me'); },
 
     // Account
@@ -97,7 +100,7 @@ const API = {
     },
     // 用 1 字节 Range 探测总大小 (Content-Range: bytes 0-0/<total>)
     async probeSize(url) {
-        const res = await fetch(url, { headers: { Range: 'bytes=0-0' } });
+        const res = await fetch(url, { headers: { Range: 'bytes=0-0', ...this.headers() } });
         const cr = res.headers.get('Content-Range');
         if (cr && cr.includes('/')) {
             const t = parseInt(cr.split('/')[1], 10);
@@ -148,7 +151,7 @@ const API = {
                     for (let attempt = 0; ; attempt++) {
                         try {
                             const want = Math.min(p + len, c.end);
-                            const res = await fetch(url, { headers: { Range: `bytes=${p}-${want - 1}` } });
+                            const res = await fetch(url, { headers: { Range: `bytes=${p}-${want - 1}`, ...this.headers() } });
                             if (res.status !== 206 && !res.ok) throw new Error(`HTTP ${res.status}`);
                             const buf = new Uint8Array(await res.arrayBuffer());
                             const cr = res.headers.get('Content-Range'); // bytes start-end/total
@@ -183,7 +186,9 @@ const API = {
         return blob;
     },
     async downloadFile(path, size, onProgress) {
-        const url = `/api/files/download?path=${encodeURIComponent(path)}&token=${this.token}`;
+        // URL 里不再带 token: 小文件走 <a download> 由浏览器直接导航, 无法自定义请求头,
+        // 这类子资源一律靠登录时下发的只读 Cookie (fm_ro, HttpOnly + SameSite=Lax) 鉴权。
+        const url = `/api/files/download?path=${encodeURIComponent(path)}`;
         const name = path.split('/').pop() || 'download';
         try {
             let total = parseInt(size, 10);
@@ -305,8 +310,11 @@ const API = {
         const blob = await res.blob();
         return { type: 'binary', url: URL.createObjectURL(blob), mime: ct };
     },
-    previewUrl(path) { return `/api/preview?path=${encodeURIComponent(path)}&token=${this.token}`; },
-    thumbnailUrl(path) { return `/api/thumbnail?path=${encodeURIComponent(path)}&token=${this.token}`; },
+    // ---- 供 <img>/<video>/<audio>/<iframe> 直接引用的 URL ----
+    // 这些标签无法自定义请求头, 故一律不带凭据; 鉴权靠只读 Cookie (见 downloadFile 的说明)。
+    // 历史上它们带 ?token=, 会把 24h 有效的 JWT 泄漏到 Workers Logs / 地址栏 / 可复制链接里。
+    previewUrl(path) { return `/api/preview?path=${encodeURIComponent(path)}`; },
+    thumbnailUrl(path) { return `/api/thumbnail?path=${encodeURIComponent(path)}`; },
     // 回写前端生成的缩略图 (canvas 压缩的小 JPEG)
     async uploadThumbnail(path, blob) {
         const fd = new FormData();
@@ -320,7 +328,7 @@ const API = {
     // Video transcoding (resolution selection)
     videoQualities(path) { return this.json('GET', `/api/video/qualities?path=${encodeURIComponent(path)}`); },
     videoPrepare(path, quality) { return this.json('GET', `/api/video/prepare?path=${encodeURIComponent(path)}&quality=${quality}`); },
-    videoUrl(path, quality) { return `/api/video?path=${encodeURIComponent(path)}&quality=${quality}&token=${this.token}`; },
+    videoUrl(path, quality) { return `/api/video?path=${encodeURIComponent(path)}&quality=${quality}`; },
 
     // Music — 歌曲元数据 (用户编辑的标题/歌手/歌词, 覆盖内嵌标签与文件名)
     trackMeta(path) { return this.json('GET', `/api/track/meta?path=${encodeURIComponent(path)}`); },
@@ -385,6 +393,8 @@ const API = {
         const body = { filename, total_chunks: totalChunks };
         if (opts.fileSize) body.file_size = opts.fileSize;
         if (opts.chunkSize) body.chunk_size = opts.chunkSize;
+        // 文件指纹: 服务端命中未完成的同源会话则复用 (返回 resumed/received), 与文件上传同协议
+        if (opts.fileKey) body.file_key = opts.fileKey;
         const res = await this.request('POST', '/api/image-host/upload/init', body);
         if (!res.ok) throw await this._uploadError(res, '初始化上传失败');
         return res.json();
@@ -408,6 +418,12 @@ const API = {
         if (batch) body.batch = batch;
         const res = await this.request('POST', '/api/image-host/upload/complete', body);
         if (!res.ok) throw await this._uploadError(res, '合并分片失败');
+        return res.json();
+    },
+    // 放弃一个未完成的图床上传 (清服务端暂存分片 + 会话); 幂等, 与文件上传共用同一实现
+    async ihUploadAbort(uploadId) {
+        const res = await this.request('POST', '/api/image-host/upload/abort', { upload_id: uploadId });
+        if (!res.ok) throw await this._uploadError(res, '取消上传失败');
         return res.json();
     },
 

@@ -141,10 +141,20 @@ export function contentDisposition(kind, filename) {
 }
 
 // ---------------- 响应助手 ----------------
+// 全站安全响应头。静态资源由 public/_headers 覆盖; 凡本文件/vfs.js 构造的响应都带上,
+// index.js 的 harden() 再对兜底路径补一次。
+//   Referrer-Policy: no-referrer —— 不把当前 URL(可能带查询参数)经 Referer 传给第三方。
+//     注: Chrome 85+ 默认已是 strict-origin-when-cross-origin, 这里显式声明不依赖浏览器默认值。
+//   X-Content-Type-Options: nosniff —— 禁止按内容嗅探类型。
+export const SEC_HEADERS = {
+  'Referrer-Policy': 'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+};
+
 export function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', ...headers },
+    headers: { 'Content-Type': 'application/json; charset=utf-8', ...SEC_HEADERS, ...headers },
   });
 }
 export const jerr = (msg, status = 400) => json({ error: msg }, status);

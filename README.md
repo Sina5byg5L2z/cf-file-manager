@@ -8,11 +8,11 @@
 
 - **文件管理**：目录树浏览、分片上传、下载、新建目录、重命名 / 移动 / 复制 / 删除、批量操作、批量打包（zip）下载、全盘搜索
 - **在线预览**：图片缩略图、音视频播放（视频多画质转码入口）、文本 / 代码高亮、Markdown / KaTeX 渲染，大文本显示限制防卡死
-- **图床**：外链图片托管，支持公开访问 `/i/*`，可从文件管理器导入
+- **图床**：外链图片托管，支持公开访问 `/i/*`，可从文件管理器导入；上传支持断点续传与取消
 - **音乐播放器**：音频在线播放，滚动歌词（手动粘贴或在线源自动获取）、专辑封面、标题 / 歌手 / 歌词手动编辑，分享页同样支持
-- **分享链接**：可选密码（PBKDF2 哈希存储）+ 过期时间 + 访问计数
+- **分享链接**：可选密码（PBKDF2 哈希存储）+ 过期时间 + 访问计数；密码只用来换一个 2 小时的签名 Cookie（带爆破限流），不会出现在链接或 URL 里
 - **WebDAV**：`/dav` 路径可直接挂载为本地磁盘（RaiDrive / Cyberduck 等客户端）
-- **单用户认证**：JWT 登录，PBKDF2 密码哈希，页面内「账号设置」可修改用户名与密码
+- **单用户认证**：JWT 登录（改密码 / 改用户名后所有旧登录态立即失效），PBKDF2 密码哈希，页面内「账号设置」可修改用户名与密码；图片 / 音视频等页面内子资源靠 HttpOnly 只读 Cookie 鉴权，令牌不出现在 URL 中
 - **参数设置**：分片规则、上传上限、预览上限页面内可视化调整，按移动端 / 电脑端两档分别生效
 - **存储分库**：空间不足时把文件字节分散到多个 D1 库扩容（每库约 470MB 可用），页面内一键启用 / 注册新库，日常使用无感
 
@@ -160,6 +160,7 @@ npx wrangler d1 execute file-manager --remote --file=./migrations/2026-09-15-db-
 npx wrangler d1 execute file-manager --remote --file=./migrations/2026-09-15-track-meta.sql    # 音乐播放器（不执行则首次使用时自动建表）
 npx wrangler d1 execute file-manager --remote --file=./migrations/2026-09-16-lyrics-reject.sql # 歌词拉黑（同上）
 npx wrangler d1 execute file-manager --remote --file=./migrations/2026-09-16-lyrics-store.sql  # 歌词持久化（同上）
+npx wrangler d1 execute file-manager --remote --file=./migrations/2026-09-18-token-version.sql # 令牌可撤销（同上；不执行则撤销能力缺失，登录不受影响）
 ```
 
 ## 目录结构

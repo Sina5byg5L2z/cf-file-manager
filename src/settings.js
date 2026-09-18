@@ -3,7 +3,7 @@
 // 分片大小只允许 CHUNK_CANDIDATES 集合内的值: 上传 complete 时服务端靠
 // (size, nchunks) 反推真实分片大小, 集合外的值会导致推导失败
 // ============================================================================
-import { jerr, json, cacheGet, cachePut, cacheDel } from './util.js';
+import { jerr, json, cacheGet, cachePut, cacheDel, SEC_HEADERS } from './util.js';
 import * as auth from './auth.js';
 
 // 与 util.js deriveChunkSize 的候选集保持一致
@@ -224,7 +224,8 @@ export async function getSettings(req, env, db) {
     await cachePut('app-settings', new Response(payload), 300);
   }
   try {
-    const denied = await auth.checkAuth(req, env);
+    // 登录态(Header 或只读 Cookie)才能拿到私有字段; 未登录只下发公开部分
+    const denied = await auth.checkAuth(req, env, db);
     if (!denied) {
       const stored = await readStored(db);
       const lyr = normalize(stored, maxUploadOf(env)).lyrics;
@@ -238,7 +239,7 @@ export async function getSettings(req, env, db) {
       }
     }
   } catch { /* 鉴权异常按未登录处理, 不下发私有字段 */ }
-  return new Response(payload, { headers: { 'Content-Type': 'application/json; charset=utf-8' } });
+  return new Response(payload, { headers: { 'Content-Type': 'application/json; charset=utf-8', ...SEC_HEADERS } });
 }
 
 // PUT /api/settings — body 为完整设置对象(前端始终全量提交)

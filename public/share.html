@@ -20,7 +20,7 @@
             } catch (e) { /* 隐私模式等场景下保持默认暗色 */ }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260917b">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260918d">
     <link rel="stylesheet" href="/static/vendor/katex/katex@0.16.9.min.css">
     <link rel="stylesheet" id="hljsDark" href="/static/vendor/hljs/styles/github-dark@11.9.0.min.css">
     <link rel="stylesheet" id="hljsLight" href="/static/vendor/hljs/styles/github-light@11.9.0.min.css" disabled>
@@ -143,12 +143,13 @@
     <script src="/static/vendor/purify@3.4.15.min.js"></script>
     <script src="/static/js/settings.js?v=20260917b"></script>
     <script src="/static/js/lyrics.js?v=20260917d"></script>
-    <script src="/static/js/sharemusic.js?v=20260917d"></script>
+    <script src="/static/js/sharemusic.js?v=20260918e"></script>
     <script>
     (function() {
         const shareId = window.location.pathname.split('/s/')[1]?.split('?')[0]?.split('/')[0] || '';
         const app = document.getElementById('app');
-        let currentPassword = '';
+        // 密码只在"解锁"那一次用到: 提交后服务端回一个签名 Cookie (fm_s_<id>, HttpOnly),
+        // 之后所有子资源都靠 Cookie, URL 里不再出现密码。所以这里不保存明文密码。
         let currentPath = '';
         let currentSubPath = '';
         let dirEntries = []; // cached for inline preview back navigation
@@ -285,10 +286,9 @@
         };
 
 
-        async function fetchData(subPath, password) {
+        async function fetchData(subPath) {
             let url = '/s/' + shareId + '?data=1';
             if (subPath) url += '&sub_path=' + encodeURIComponent(subPath);
-            if (password) url += '&password=' + encodeURIComponent(currentPassword);
             const res = await fetch(url);
             const data = await res.json();
             if (!res.ok && !data.need_password) throw new Error(data.error || '请求失败');
@@ -320,9 +320,24 @@
             input.focus();
         }
 
+        // 用密码换取短 TTL 的签名会话 Cookie (POST /s/<id>) —— 密码只在这一步出现,
+        // 且走请求体而不是 URL。换到之后页面不再持有明文密码。
         async function submitPassword(pwd) {
-            currentPassword = pwd;
-            await load();
+            const btn = document.getElementById('pwdSubmit');
+            if (btn) { btn.disabled = true; btn.textContent = '验证中...'; }
+            try {
+                const res = await fetch('/s/' + shareId, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: pwd || '' })
+                });
+                const data = await res.json().catch(function() { return {}; });
+                if (!res.ok) { showPasswordForm(data.error || '密码错误'); return; }
+                currentSubPath = '';
+                load();
+            } catch (e) {
+                showPasswordForm('网络错误，请重试');
+            }
         }
 
         function renderDirectory(data) {
@@ -369,7 +384,6 @@
                     if (!entry.is_dir && isImage) {
                         let thumbUrl = '/s/' + shareId + '?thumb=1&name=' + encodeURIComponent(entry.name);
                         if (currentSubPath) thumbUrl += '&sub_path=' + encodeURIComponent(currentSubPath);
-                        if (currentPassword) thumbUrl += '&password=' + encodeURIComponent(currentPassword);
                         icon = '<img src="' + thumbUrl + '" alt="" loading="lazy">';
                     } else {
                         icon = getFileIcon(entry.name, entry.is_dir);
@@ -485,8 +499,7 @@
             if (!window.ShareMusic) return;
             ShareMusic.init({
                 shareId: shareId,
-                subPath: function () { return currentSubPath; },
-                password: function () { return currentPassword; }
+                subPath: function () { return currentSubPath; }
             });
         }
 
@@ -651,7 +664,6 @@
             // 与下载用的 download=1 区分: PDF 在 iframe 里遇 attachment 会被浏览器当下载
             var fileUrl = '/s/' + shareId + '?inline=1&name=' + encodeURIComponent(name);
             if (currentSubPath) fileUrl += '&sub_path=' + encodeURIComponent(currentSubPath);
-            if (currentPassword) fileUrl += '&password=' + encodeURIComponent(currentPassword);
 
             // Image
             if (kind === 'image') {
@@ -675,7 +687,6 @@
                 area.innerHTML = '<div class="vp-host"></div>';
                 var qbase = '/s/' + shareId + '?name=' + encodeURIComponent(name);
                 if (currentSubPath) qbase += '&sub_path=' + encodeURIComponent(currentSubPath);
-                if (currentPassword) qbase += '&password=' + encodeURIComponent(currentPassword);
                 window._sharePlayer = VideoPlayer.create(area.querySelector('.vp-host'), fileUrl, {
                     onDownload: function () { downloadFile(name); },
                     quality: {
@@ -923,7 +934,6 @@
             // name is just the filename; backend resolves via sub_path
             let url = '/s/' + shareId + '?download=1&name=' + encodeURIComponent(name);
             if (currentSubPath) url += '&sub_path=' + encodeURIComponent(currentSubPath);
-            if (currentPassword) url += '&password=' + encodeURIComponent(currentPassword);
 
             // Disable download buttons for this file
             app.querySelectorAll('[data-download="' + CSS.escape(name) + '"]').forEach(btn => {
@@ -967,7 +977,7 @@
             currentSubPath = subPath;
             app.innerHTML = '<div class="loading"><div class="spinner"></div> 加载中...</div>';
             try {
-                const data = await fetchData(subPath, currentPassword);
+                const data = await fetchData(subPath);
                 if (data.error) {
                     showError(data.error);
                     return;
@@ -985,7 +995,6 @@
         function downloadAll() {
             let url = '/s/' + shareId + '?download=zip';
             if (currentSubPath) url += '&sub_path=' + encodeURIComponent(currentSubPath);
-            if (currentPassword) url += '&password=' + encodeURIComponent(currentPassword);
             const a = document.createElement('a');
             a.href = url;
             a.download = '';
@@ -998,7 +1007,7 @@
         async function load() {
             app.innerHTML = '<div class="loading"><div class="spinner"></div> 加载中...</div>';
             try {
-                const data = await fetchData(currentSubPath, currentPassword);
+                const data = await fetchData(currentSubPath);
                 if (data.need_password) {
                     showPasswordForm();
                     return;

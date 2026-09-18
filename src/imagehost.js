@@ -65,20 +65,50 @@ export async function uploadInit(req, env, db) {
   const mime = mimeFromName(filename);
   if (!ALLOWED(mime)) return jerr('不支持的文件类型，仅支持图片、视频、音频和 PDF');
   const ext = fileExt(filename);
-  // 图床文件名随机生成, 同源文件重复上传会各自成一份 (不做跨会话续传匹配):
-  // 图床场景通常是小文件, 断点续传价值有限; 但仍支持"同一页面内重试不重传"。
-  const target = generateFilename(ext); // 与原版不同: 合并时才定名, 这里提前定名以直写暂存
-  const id = randomId(12);
-  const now = Date.now();
+  const fileKey = String(body.file_key || '').slice(0, 128);
   const fileSize = parseInt(body.file_size, 10) || 0;
   const chunkSize = parseInt(body.chunk_size, 10) || 0;
+  const now = Date.now();
+
+  // 命中未完成的同源会话 → 复用 (与文件上传同协议, 见 vfs.uploadInit)。
+  // 图床没有目录概念, 且 target 是随机名 (每次 init 都会换) —— 所以用「原始文件名 +
+  // 分片数 + 分片大小」代替文件上传那边的 target 做匹配条件; 复用时就沿用旧会话的
+  // target, 否则已合并进 'i:<旧 target>' 的分片会丢失。
+  // 注意: complete 成功后会删掉会话行, 所以「故意重复上传同一文件」仍会正常新建一份。
+  if (fileKey) {
+    const exist = await db.prepare(
+      'SELECT id, target, total_chunks, chunk_size, merged_upto, db_id FROM upload_sessions WHERE kind = \'image\' AND file_key = ?1 AND filename = ?2 AND total_chunks = ?3 AND (chunk_size = ?4 OR chunk_size = 0) ORDER BY updated_at DESC LIMIT 1',
+    ).bind(fileKey, filename, total, chunkSize).first();
+    if (exist) {
+      // 暂存分片在会话「钉住」的库里, 必须按主库记录的 db_id 去对应库查 (同 vfs)
+      const vdb = dbById(env, exist.db_id || 1) || db;
+      const rows = (await vdb.prepare('SELECT idx, hash FROM blobs WHERE key = ?1 ORDER BY idx').bind('u:' + exist.id).all()).results || [];
+      // 已传分片 = 暂存键上的 + 已合并进最终键的 (complete 分批中断后的续传场景)
+      const got = new Set(rows.map((r) => r.idx));
+      const merged = exist.merged_upto || 0;
+      for (let i = 0; i < merged; i++) got.add(i);
+      await db.prepare('UPDATE upload_sessions SET updated_at = ?2 WHERE id = ?1').bind(exist.id, now).run();
+      return json({
+        upload_id: exist.id,
+        target: exist.target,
+        total_chunks: exist.total_chunks,
+        resumed: true,
+        db_id: exist.db_id || 1,
+        received: [...got].sort((a, b) => a - b),
+        hashes: rows.filter((r) => r.hash).map((r) => ({ idx: r.idx, hash: r.hash })),
+      });
+    }
+  }
+
+  const target = generateFilename(ext); // 与原版不同: 合并时才定名, 这里提前定名以直写暂存
+  const id = randomId(12);
   // 与文件上传同样「钉库」: 暂存分片与最终键必须同库, 合并才不跨库 (I2)
   const need = fileSize + 32 * (chunkSize || 1048576);
   const picked = await pickDb(env, db, need);
   if (!picked.ok) return capacityResponse(db, need, picked);
-  await db.prepare('INSERT INTO upload_sessions (id, kind, target, filename, total_chunks, mime, file_size, file_key, chunk_size, created_at, updated_at, db_id) VALUES (?1,\'image\',?2,?3,?4,?5,?6,\'\',?7,?8,?8,?9)')
-    .bind(id, target, filename, total, mime, fileSize, chunkSize, now, picked.row.id).run();
-  return json({ upload_id: id, total_chunks: total, resumed: false, received: [], hashes: [], db_id: picked.row.id });
+  await db.prepare('INSERT INTO upload_sessions (id, kind, target, filename, total_chunks, mime, file_size, file_key, chunk_size, created_at, updated_at, db_id) VALUES (?1,\'image\',?2,?3,?4,?5,?6,?7,?8,?9,?9,?10)')
+    .bind(id, target, filename, total, mime, fileSize, fileKey, chunkSize, now, picked.row.id).run();
+  return json({ upload_id: id, target, total_chunks: total, resumed: false, received: [], hashes: [], db_id: picked.row.id });
 }
 
 // 分片上传 chunk/complete 与文件管理器共用同一实现 (vfs.js), 由路由按 kind 分发

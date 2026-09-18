@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY CHECK (id = 1),
   username      TEXT NOT NULL,
   password_hash TEXT NOT NULL,          -- pbkdf2$<iter>$<saltB64>$<hashB64>
-  updated_at    TEXT NOT NULL
+  updated_at    TEXT NOT NULL,
+  token_version INTEGER NOT NULL DEFAULT 0  -- 改密码/改用户名时 +1, 使已签发的 JWT 立即失效
 );
 
 -- ---------------- 存储分库（元数据永在主库, 文件字节按"文件"分散到各库） ----------------

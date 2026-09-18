@@ -30,7 +30,7 @@
         collapse: '<svg viewBox="0 0 24 24"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6 6z"/></svg>',
     };
 
-    var cfg = null;          // { shareId, subPath(), password() }
+    var cfg = null;          // { shareId, subPath() }  —— 鉴权靠签名 Cookie, 不再需要 password()
     var audio = null;
     var el = {};
     var booted = false;
@@ -74,15 +74,15 @@
         return AUDIO_EXT.indexOf(ext) >= 0;
     }
 
-    // ---------------- URL 构造 (一律带上分享鉴权参数) ----------------
+    // ---------------- URL 构造 ----------------
+    // 分享鉴权靠解锁时下发的签名 Cookie (fm_s_<id>, HttpOnly), 浏览器会自动带上。
+    // 密码不再进 URL —— 那会落进访问日志、浏览器历史和"复制链接"里, 而分享密码无法更换。
     function withAuth(url, obj) {
         var parts = [];
         for (var k in obj) {
             if (obj[k] === undefined || obj[k] === null || obj[k] === '') continue;
             parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(obj[k]));
         }
-        var pwd = cfg.password ? cfg.password() : '';
-        if (pwd) parts.push('password=' + encodeURIComponent(pwd));
         return url + (url.indexOf('?') < 0 ? '?' : '&') + parts.join('&');
     }
     function base() { return '/s/' + cfg.shareId; }
@@ -159,6 +159,12 @@
             + '<div class="mp-panel-list" id="smQueueList"></div></div>',
         ].join('');
         while (wrap.firstChild) document.body.appendChild(wrap.firstChild);
+
+        // 占位块: 高度跟随 --mp-bar-h, 给 fixed 底栏让出文档流空间(见 setBarSpace 注释)
+        el.dock = document.createElement('div');
+        el.dock.className = 'mp-dock';
+        el.dock.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(el.dock);
 
         el.bar = q('#smBar'); el.full = q('#smFull'); el.qpanel = q('#smQueue');
         el.cover = q('#smCover'); el.bigcover = q('#smBigCover');
@@ -377,10 +383,20 @@
         el.dur.textContent = d > 0 ? fmt(d) : '--:--';
     }
 
+    // 底栏是 fixed 定位, 不占文档流: 把实际高度写进 --mp-bar-h, 由 body 末尾的 .mp-dock
+    // 占位块按这个高度撑出空间(见 buildDom), 否则会盖住分享页最后一行内容。
+    // 高度会随窄屏换行/字号变化, 所以交给 ResizeObserver 重算, 不是一次性快照。
+    var lastBarH = -1;   // 高度没变就不重复写, 顺带杜绝 ResizeObserver 自激
+    function setBarSpace() {
+        var h = el.bar.style.display === 'none' ? 0 : (el.bar.offsetHeight || 0);
+        if (h === lastBarH) return;
+        lastBarH = h;
+        document.documentElement.style.setProperty('--mp-bar-h', h + 'px');
+        document.body.classList.toggle('mp-on', h > 0);
+    }
     function showBar(on) {
         el.bar.style.display = on ? 'flex' : 'none';
-        // 底栏是 fixed: 给 body 留出等高空间, 否则会盖住分享页最后一行内容
-        document.body.style.paddingBottom = on ? (el.bar.offsetHeight + 10) + 'px' : '';
+        setBarSpace();
     }
 
     function openFull(on) {
@@ -589,6 +605,7 @@
         var f = 15;
         try { f = parseInt(localStorage.getItem('mp-lyric-font'), 10) || 15; } catch (e) {}
         applyFont(f);
+        if (global.ResizeObserver) new global.ResizeObserver(setBarSpace).observe(el.bar);
         return global.ShareMusic;
     }
 

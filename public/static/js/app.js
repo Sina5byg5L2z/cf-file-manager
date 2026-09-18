@@ -30,8 +30,10 @@
     // Image Host
     document.getElementById('btnImageHost').addEventListener('click', () => ImageHost.show());
 
-    // Logout
-    document.getElementById('btnLogout').addEventListener('click', () => {
+    // Logout — 必须同时让服务端清掉只读 Cookie(它是 HttpOnly, 前端删不掉),
+    // 否则退出后直接访问 /api/preview?path=... 仍能读到文件。
+    document.getElementById('btnLogout').addEventListener('click', async () => {
+        try { await API.logout(); } catch (e) { /* 服务端不可达也要退出本地登录态 */ }
         API.clearToken();
         window.location.href = '/';
     });

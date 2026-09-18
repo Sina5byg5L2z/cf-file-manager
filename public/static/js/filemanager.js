@@ -302,8 +302,13 @@ const FM = {
         }
         menu.style.display = 'block';
         const rect = menu.getBoundingClientRect();
+        // 播放底栏固定在视口底部且盖在内容之上, 可用高度要把它扣掉, 否则菜单下半截会被压住
+        const barH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--mp-bar-h')) || 0;
+        const availH = window.innerHeight - barH;
         if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
-        if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
+        if (y + rect.height > availH) y = availH - rect.height - 8;
+        if (y < 8) y = 8;
+        if (x < 8) x = 8;
         menu.style.left = x + 'px';
         menu.style.top = y + 'px';
     },

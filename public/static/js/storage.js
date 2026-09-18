@@ -3,9 +3,14 @@
 //
 //   1. 容量告警: 后端 507 {code:'D1_CAPACITY'} 的统一出口, 按名额池分三态引导
 //   2. 存储库面板: 「参数设置 → 存储库」里的库清单与一键扩容
-//   3. 主库高危横幅: 主库剩余 < 20MB 时常驻提示
+//   3. 主库高危横幅: 主库**实际剩余** (limit_bytes - used_bytes) < 20MB 时常驻提示
 //      (主库满了连 fs_nodes / storage_dbs 都写不了, 用户会失去「删文件腾空间」的能力)
 // ============================================================================
+
+// 主库高危横幅阈值: 主库实际剩余空间低于此值就常驻提示。
+// 注意判据是 limit_bytes - used_bytes, 不是后端返回的 free_bytes —— 见 StorageUI.boot 注释。
+const PRIMARY_ALERT_BYTES = 20 * 1024 * 1024;
+
 const StorageUI = {
     _busy: false,
     _panelLoading: false,
@@ -269,13 +274,23 @@ const StorageUI = {
     // ---------------- 主库高危横幅 ----------------
     // 主库满 = 整个应用不可用 (连 fs_nodes / storage_dbs 都写不了)。
     // 这个告警的级别高于普通容量不足, 所以常驻显示而不是一次性弹窗。
+    //
+    // 判据: 主库**实际剩余** = limit_bytes - used_bytes。
+    //   不能拿后端返回的 free_bytes 当判据 —— free_bytes = limit - used - reserve,
+    //   它回答的是「这个库还能再塞多少文件字节」, 已经扣掉了给元数据预留的 reserve_bytes。
+    //   拿它来判断"主库快满了"会整整提前一个 reserve 报错: 主库 reserve=100MB,
+    //   于是 380MB 就误报 (500-380-100=20MB < 阈值)。预留本来就是留给元数据的,
+    //   它被占用是正常现象, 不是危险信号; 真正危险的是整个库只剩不到 20MB。
     async boot() {
         try {
             const d = await API.getStorage();
             const primary = (d.items || []).find((i) => i.role === 'primary');
-            if (primary && primary.free_bytes < 20 * 1024 * 1024) {
-                this._banner('主库剩余空间仅 ' + this.fmt(primary.free_bytes) +
-                    '。主库负责保存目录结构等元数据，写满后将无法新建目录或上传文件，请尽快清理。');
+            if (!primary) return;
+            const headroom = Math.max(0, (primary.limit_bytes || 0) - (primary.used_bytes || 0));
+            if (headroom < PRIMARY_ALERT_BYTES) {
+                this._banner('主库实际剩余空间仅 ' + this.fmt(headroom) +
+                    '（预留的 ' + this.fmt(primary.reserve_bytes) + ' 元数据空间已基本被占用）。' +
+                    '主库负责保存目录结构等元数据，写满后将无法新建目录或上传文件，请尽快清理。');
             }
         } catch (e) { /* 忽略: 不影响页面 */ }
     },

@@ -288,8 +288,9 @@
     function readTags(path, ext) {
         var API = global.API;
         if (!API || !API.token) return Promise.resolve(null);
-        var url = '/api/files/download?path=' + encodeURIComponent(path) + '&token=' + encodeURIComponent(API.token);
-        return fetch(url, { headers: { Range: 'bytes=0-' + (HEAD_BYTES - 1) } })
+        // fetch 能自定义请求头, 就不必再把 token 拼进 URL(会进 Workers Logs / 浏览器地址栏)
+        var url = '/api/files/download?path=' + encodeURIComponent(path);
+        return fetch(url, { headers: { Range: 'bytes=0-' + (HEAD_BYTES - 1), Authorization: 'Bearer ' + API.token } })
             .then(function (r) { return r.ok || r.status === 206 ? r.arrayBuffer() : null; })
             .then(function (buf) {
                 if (!buf) return null;

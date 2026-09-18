@@ -10,6 +10,7 @@ import {
 } from './util.js';
 import { getNode, serveFileContent, collectZipEntries, zipStreamResponse } from './vfs.js';
 import { shareLyrics, shareCover } from './lyrics.js';
+import { cookieValue, cookieHeader, isSecureReq, signPayload, verifyPayload } from './auth.js';
 
 const SHARE_COLS = 'id, path, password, expires_at, created_at, access_count, last_accessed_at';
 
@@ -22,6 +23,78 @@ async function getShareCached(db, id) {
   const row = await db.prepare(`SELECT ${SHARE_COLS} FROM share_links WHERE id = ?1`).bind(id).first();
   if (row) await cachePut(ck, json(row), 120);
   return row || null;
+}
+
+// ---------------- 分享会话 (密码换签名 Cookie) ----------------
+// 分享密码不再进 URL: 首次输入 → POST /s/<id> 校验 → 换一个 HMAC 签名的短 TTL Cookie。
+// 之后所有子资源(缩略图/图片/音频/视频/歌词/打包下载)只带 Cookie, URL 里不再出现密码。
+//
+// 为什么必须这么改: 密码进 URL 会落到访问日志、浏览器历史、Referer 和"复制链接"里;
+// 而 share_links 只存 password hash, 没有改密入口 —— 密码一旦泄漏就无法轮换, 只能删掉分享重建。
+const SESSION_TTL = 2 * 3600;   // 2 小时: 够连续浏览目录与播放, 又不至于长期驻留
+
+function sessionCookieName(id) { return 'fm_s_' + id; }
+
+async function makeSession(id, env) {
+  const exp = Math.floor(Date.now() / 1000) + SESSION_TTL;
+  const payload = `s1:${id}:${exp}`;     // s1 = 分享会话 v1, 与 JWT 的用途隔离, 不可互换
+  const sig = await signPayload(payload, env.JWT_SECRET);
+  return `${exp}.${sig}`;
+}
+
+async function sessionOk(req, env, id) {
+  const raw = cookieValue(req, sessionCookieName(id));
+  if (!raw) return false;
+  const dot = raw.indexOf('.');
+  if (dot <= 0) return false;
+  const exp = parseInt(raw.slice(0, dot), 10);
+  if (!Number.isFinite(exp) || exp * 1000 < Date.now()) return false;
+  return verifyPayload(`s1:${id}:${exp}`, raw.slice(dot + 1), env.JWT_SECRET);
+}
+
+// 解锁限流: 分享密码是用户自选的弱口令, 不限流就能被在线爆破 (与 login 同为尽力而为的内存实现)
+const tries = new Map();
+const TRY_MAX = 8;
+const TRY_WINDOW = 5 * 60 * 1000;
+const TRY_LOCK = 15 * 60 * 1000;
+function tryKey(req, id) {
+  const ip = (req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || 'unknown')
+    .split(',')[0].trim();
+  return id + '|' + ip;
+}
+function tryLimited(k) {
+  const e = tries.get(k);
+  if (!e) return false;
+  if (Date.now() - e.first > TRY_WINDOW + TRY_LOCK) { tries.delete(k); return false; }
+  return e.count >= TRY_MAX;
+}
+function tryFail(k) {
+  const e = tries.get(k);
+  if (!e || Date.now() - e.first >= TRY_WINDOW) tries.set(k, { count: 1, first: Date.now() });
+  else e.count++;
+}
+
+// POST /s/<id> — 用密码换签名会话 Cookie; 无密码分享直接放行 (不必发 Cookie)
+export async function unlockShare(req, env, db, id) {
+  const link = await getShareCached(db, id);
+  if (!link) return jerr('分享链接不存在', 404);
+  if (link.expires_at && new Date(link.expires_at).getTime() < Date.now()) return jerr('链接已过期', 410);
+  if (!link.password) return json({ ok: true });
+
+  const k = tryKey(req, id);
+  if (tryLimited(k)) return jerr('密码尝试过多，请稍后再试', 429);
+
+  let body = null;
+  try { body = await req.json(); } catch { /* 非法 JSON 按未提供密码处理 */ }
+  const pwd = String((body && body.password) || '');
+  if (!pwd) return jerr('请输入密码', 400);
+  if (!(await verifyPassword(pwd, link.password))) { tryFail(k); return jerr('密码错误', 401); }
+
+  tries.delete(k);
+  const val = await makeSession(id, env);
+  return json({ ok: true, expires_in: SESSION_TTL }, 200, {
+    'Set-Cookie': cookieHeader(sessionCookieName(id), val, SESSION_TTL, `/s/${id}`, isSecureReq(req)),
+  });
 }
 
 // ---------------- CRUD (需登录) ----------------
@@ -85,11 +158,10 @@ export async function accessShare(req, env, db, id, url) {
     return jerr('链接已过期', 410);
   }
 
-  // 密码检查
+  // 密码检查: 只认解锁时换来的签名 Cookie。URL 上的 password 参数已不再受理
+  // (旧 ?password= 链接会落到 need_password, 页面重新弹密码框换会话)。
   if (link.password) {
-    const provided = q.get('password') || '';
-    if (!provided) return json({ need_password: true, id });
-    if (!(await verifyPassword(provided, link.password))) return jerr('密码错误', 401);
+    if (!(await sessionOk(req, env, id))) return json({ need_password: true, id });
   }
 
   // 访问计数节流: 同一分享 60s 内只写一次 D1

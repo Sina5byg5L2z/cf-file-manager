@@ -1,0 +1,11 @@
+-- JWT 可撤销: users.token_version (2026-09-18)
+-- 背景: 此前的 JWT 是无状态的, 签发后在有效期内(默认 24h)无法作废 ——
+--       改密码/改用户名都不会让已泄漏的 token 失效, 泄漏后无补救手段。
+--
+-- 语义:
+--   签发时把当前 token_version 写进 payload 的 tv 字段; 每次校验都比对两值。
+--   改密码 / 改用户名时 token_version + 1 → 所有旧 token 立即失效。
+--
+-- 默认 0 是为了兼容改造前签发的 token: 那些 token 没有 tv 字段, 按 0 处理,
+-- 因此升级部署本身不会把现有会话踢下线。
+ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0;

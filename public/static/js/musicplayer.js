@@ -64,6 +64,24 @@
         return i === -1 ? '' : s.slice(0, i);
     }
 
+    // ---------------- 底栏占位 ----------------
+    // 底栏 position:fixed 脱离文档流, 不占位就会压住页面底部内容。
+    // 做法: 把实际高度写进 --mp-bar-h, 由 body 末尾的 .mp-dock 占位块按这个高度撑出空间
+    // (管理页挤掉 .file-area, 分享页撑高滚动范围; 为什么不用 body padding 见 style.css 注释)。
+    var lastBarH = -1;   // 高度没变就不重复写, 顺带杜绝 ResizeObserver 自激
+    function setBarSpace() {
+        var h = el.bar.style.display === 'none' ? 0 : (el.bar.offsetHeight || 0);
+        if (h === lastBarH) return;
+        lastBarH = h;
+        document.documentElement.style.setProperty('--mp-bar-h', h + 'px');
+        document.body.classList.toggle('mp-on', h > 0);
+    }
+    function watchBarHeight() {
+        if (!global.ResizeObserver) return;
+        // 窄屏底栏换行成两行、字号变化都会改高度, 不能只在切显示那一下算一次
+        new global.ResizeObserver(setBarSpace).observe(el.bar);
+    }
+
     // ---------------- DOM ----------------
     function buildDom() {
         var wrap = document.createElement('div');
@@ -153,6 +171,12 @@
         ].join('');
         document.body.appendChild(wrap);
 
+        // 占位块: 高度跟随 --mp-bar-h, 给 fixed 底栏让出文档流空间(见 setBarSpace 注释)
+        el.dock = document.createElement('div');
+        el.dock.className = 'mp-dock';
+        el.dock.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(el.dock);
+
         el.bar = q('#mpBar');
         el.cover = q('#mpCover');
         el.title = q('#mpTitle');
@@ -188,6 +212,7 @@
 
         bind();
         applyLyricFont();
+        watchBarHeight();
     }
 
     function bind() {
@@ -678,6 +703,7 @@
         el.title.textContent = title;
         el.sub.textContent = artist;
         el.bar.style.display = state.queue.length ? 'flex' : 'none';
+        setBarSpace();      // 底栏显隐/高度变了 → 同步页面底部占位
         el.cover.style.backgroundImage = c && c.coverUrl ? 'url("' + c.coverUrl + '")' : '';
         // play/mode 是动态图标, 底栏与歌词页各一处, 一起刷
         var playIc = audio.paused ? ICONS.play : ICONS.pause;
