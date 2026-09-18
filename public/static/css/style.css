@@ -171,7 +171,10 @@ body{font-family:var(--font);background:var(--bg-base);color:var(--text-primary)
 /* 拖拽占位框: 内容隐藏只剩虚线空框, 对齐参考 demo 的 .moving 效果 */
 .chunk-rule-row.dragging{outline:1px dashed var(--accent);outline-offset:-1px;border-radius:var(--radius-sm)}
 .chunk-rule-row.dragging > *{visibility:hidden}
-.rule-ghost{opacity:.96;background:var(--bg-raised);box-shadow:0 14px 34px rgba(0,0,0,.4);outline:1px solid var(--accent);border-radius:var(--radius-sm);z-index:700}
+/* 拖动幽灵行由 settings.js dragBind 挂到 body 上, 与设置弹窗 .modal-overlay(1180) 同级比较层级,
+   必须高于遮罩: 否则拖动时整行被弹窗盖住, 看起来像排序失效(而 DOM 其实已经在换位, 更危险);
+   仍留在 .dlg-overlay(1300) 之下 */
+.rule-ghost{opacity:.96;background:var(--bg-raised);box-shadow:0 14px 34px rgba(0,0,0,.4);outline:1px solid var(--accent);border-radius:var(--radius-sm);z-index:1260}
 .rule-drag{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;height:38px;cursor:grab;touch-action:none;user-select:none;border:1px solid transparent;border-radius:var(--radius-sm)}
 .rule-drag:active{cursor:grabbing}
 .rule-drag:hover{border-color:var(--border);background:var(--bg-base)}
