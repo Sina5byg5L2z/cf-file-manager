@@ -148,6 +148,7 @@
     (function() {
         const shareId = window.location.pathname.split('/s/')[1]?.split('?')[0]?.split('/')[0] || '';
         const app = document.getElementById('app');
+
         // 密码只在"解锁"那一次用到: 提交后服务端回一个签名 Cookie (fm_s_<id>, HttpOnly),
         // 之后所有子资源都靠 Cookie, URL 里不再出现密码。所以这里不保存明文密码。
         let currentPath = '';
@@ -836,15 +837,17 @@
             return 8 * 1024 * 1024;
         }
 
+        // 保存已拼装好的 Blob。
         function saveBlob(blob, name) {
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
             a.download = name;
             a.style.display = 'none';
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            setTimeout(function() { URL.revokeObjectURL(a.href); }, 30000);
+            setTimeout(function() { URL.revokeObjectURL(url); }, 30000);
         }
 
         function directDownload(url, name, useName) {
@@ -857,7 +860,7 @@
             document.body.removeChild(a);
         }
 
-        async function downloadChunked(name, url, size) {
+        async function downloadChunked(name, url, size, mime) {
             const MAX_W = dlWindow();
             const chunks = [];
             for (let s = 0; s < size; s += MAX_W) chunks.push({ start: s, end: Math.min(s + MAX_W, size) });
@@ -908,23 +911,37 @@
             };
             await Promise.all([worker(), worker(), worker()]);
 
-            const blob = new Blob(parts.flat());
+            const blob = new Blob(parts.flat(), mime ? { type: mime } : undefined);
             if (blob.size !== size) {
                 throw new Error('下载不完整：实收 ' + blob.size + ' / 应有 ' + size + ' 字节，已放弃保存');
             }
             return blob;
         }
 
-        // 用 1 字节 Range 探测总大小 (Content-Range: bytes 0-0/<total>)
+        // 解析 Content-Disposition 文件名: 优先 filename*=UTF-8'' 形式 (RFC5987), 回退 filename=""
+        function nameFromDisposition(cd) {
+            if (!cd) return '';
+            var star = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(cd);
+            if (star) {
+                try { return decodeURIComponent(star[1].trim()); } catch (e) { /* 回退 */ }
+            }
+            var plain = /filename\s*=\s*"([^"]*)"/i.exec(cd) || /filename\s*=\s*([^;]+)/i.exec(cd);
+            return plain ? plain[1].trim() : '';
+        }
+
+        // 用 1 字节 Range 探测总大小 + MIME + 服务端文件名
+        // MIME 用于分片拼 Blob —— 缺了它 blob.type 为空, 大文件会被系统按 text/plain 关联成 .txt。
         async function probeSize(url) {
             const res = await fetch(url, { headers: { Range: 'bytes=0-0' } });
+            const type = res.headers.get('Content-Type') || '';
+            const name = nameFromDisposition(res.headers.get('Content-Disposition'));
             const cr = res.headers.get('Content-Range');
             if (cr && cr.indexOf('/') !== -1) {
                 const t = parseInt(cr.split('/')[1], 10);
-                if (Number.isFinite(t)) return t;
+                if (Number.isFinite(t)) return { total: t, type: type, name: name };
             }
             const len = res.headers.get('Content-Length');
-            return len ? parseInt(len, 10) : NaN;
+            return { total: len ? parseInt(len, 10) : NaN, type: type, name: name };
         }
 
         function downloadFile(name) {
@@ -954,9 +971,24 @@
 
             (async function() {
                 let size = _entrySizes[name];
-                if (!size) size = await probeSize(url);            // 列表里没带大小时先探测, 才能做完整性校验
+                let mime = '';
+                let srvName = '';
+                if (!size) {
+                    // 列表里没带大小时先探测 (同时拿回 MIME 与服务端文件名)
+                    const probed = await probeSize(url);
+                    size = probed.total; mime = probed.type; srvName = probed.name;
+                }
                 if (Number.isFinite(size) && size > DL_SMALL) {
-                    saveBlob(await downloadChunked(name, url, size), name);
+                    // 已知大小时 MIME/服务端名还没拿到; 补一次探测 (失败不阻断下载)
+                    if (!mime || !srvName) {
+                        try {
+                            const probed = await probeSize(url);
+                            mime = mime || probed.type || '';
+                            srvName = srvName || probed.name || '';
+                        } catch (e) { /* 退化 */ }
+                    }
+                    var blob = await downloadChunked(name, url, size, mime);
+                    await saveBlob(blob, srvName || name);
                     release();
                     return;
                 }

@@ -98,26 +98,45 @@ const API = {
         } catch (e) { /* 未加载设置时用默认 */ }
         return 8 * 1024 * 1024;
     },
-    // 用 1 字节 Range 探测总大小 (Content-Range: bytes 0-0/<total>)
+    // 用 1 字节 Range 探测总大小 + MIME + 服务端文件名
+    // 返回 { total, type, name }; MIME 用于大文件分片拼 Blob 时写入 blob.type —— 否则 blob.type 为空,
+    // 浏览器落盘会按 text/plain 关联, 表现为"大文件下载后变成 .txt"。
+    // name: 从服务端 Content-Disposition 解析 (RFC5987 filename* 优先), 是浏览器原生下载用的同一个名字,
+    //       前端分片下载沿用它, 保证两条下载路径文件名完全一致 (不再靠前端拼 path 猜)。
     async probeSize(url) {
         const res = await fetch(url, { headers: { Range: 'bytes=0-0', ...this.headers() } });
+        const type = res.headers.get('Content-Type') || '';
+        const name = this._nameFromDisposition(res.headers.get('Content-Disposition'));
         const cr = res.headers.get('Content-Range');
         if (cr && cr.includes('/')) {
             const t = parseInt(cr.split('/')[1], 10);
-            if (Number.isFinite(t)) return t;
+            if (Number.isFinite(t)) return { total: t, type, name };
         }
         const len = res.headers.get('Content-Length');
-        return len ? parseInt(len, 10) : NaN;
+        return { total: len ? parseInt(len, 10) : NaN, type, name };
     },
+    // 解析 Content-Disposition 里的文件名。优先 filename*=UTF-8''<percent-encoded> (RFC5987),
+    // 回退 filename="..." (可能含非 ASCII 被替换成 _ 的降级形式)。解析失败返回 ''。
+    _nameFromDisposition(cd) {
+        if (!cd) return '';
+        const star = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(cd);
+        if (star) {
+            try { return decodeURIComponent(star[1].trim()); } catch (e) { /* 坏编码则回退 */ }
+        }
+        const plain = /filename\s*=\s*"([^"]*)"/i.exec(cd) || /filename\s*=\s*([^;]+)/i.exec(cd);
+        return plain ? plain[1].trim() : '';
+    },
+    // 保存已拼装好的 Blob。
     _saveBlob(blob, name) {
+        const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
+        a.href = url;
         a.download = name;
         a.style.display = 'none';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
     },
     _directDownload(url) {
         const a = document.createElement('a');
@@ -133,7 +152,8 @@ const API = {
     //   ② 每段实际字节数 = 该段承诺长度;
     //   ③ 拼装后 blob.size = 已知总长 —— 不等就报错, 绝不当成功交出残缺文件。
     // 单段失败折半窗口重试(最小 1MiB): 平台在 CPU 上限处会静默截断, 只有小窗口能救回来。
-    async _rangeDownload(url, total, onProgress) {
+    // mime: 服务端 Content-Type, 写入拼装 Blob 的类型 —— 缺了它大文件会被系统按 text/plain 关联成 .txt。
+    async _rangeDownload(url, total, onProgress, mime) {
         const MAX_W = this._dlWindow(), MIN_W = 1024 * 1024, CONC = 3;
         const chunks = [];
         for (let s = 0; s < total; s += MAX_W) chunks.push({ start: s, end: Math.min(s + MAX_W, total) });
@@ -181,7 +201,7 @@ const API = {
         };
         await Promise.all(Array.from({ length: CONC }, worker));
 
-        const blob = new Blob(parts.flat());
+        const blob = new Blob(parts.flat(), mime ? { type: mime } : undefined);
         if (blob.size !== total) throw new Error(`下载不完整：实收 ${blob.size} / 应有 ${total} 字节，已放弃保存`);
         return blob;
     },
@@ -189,13 +209,28 @@ const API = {
         // URL 里不再带 token: 小文件走 <a download> 由浏览器直接导航, 无法自定义请求头,
         // 这类子资源一律靠登录时下发的只读 Cookie (fm_ro, HttpOnly + SameSite=Lax) 鉴权。
         const url = `/api/files/download?path=${encodeURIComponent(path)}`;
-        const name = path.split('/').pop() || 'download';
+        const fallbackName = path.split('/').pop() || 'download';   // 服务端没给名字时的兜底
         try {
             let total = parseInt(size, 10);
-            if (!Number.isFinite(total) || total <= 0) total = await this.probeSize(url); // 调用方没带大小时先探测
+            let mime = '';
+            let name = '';
+            if (!Number.isFinite(total) || total <= 0) {
+                // 调用方没带大小时先探测 (同时拿回 MIME 与服务端文件名)
+                const probed = await this.probeSize(url);
+                total = probed.total; mime = probed.type; name = probed.name;
+            }
             if (!Number.isFinite(total)) throw new Error('读不到文件大小，无法校验完整性');
             if (total <= 4 * 1024 * 1024) { this._directDownload(url); return; } // 小文件走浏览器原生下载
-            this._saveBlob(await this._rangeDownload(url, total, onProgress), name);
+            // 已知总大小时 MIME/文件名还没拿到; 补一次探测 (失败不阻断下载)
+            if (!mime || !name) {
+                try {
+                    const probed = await this.probeSize(url);
+                    mime = mime || probed.type || '';
+                    name = name || probed.name || '';
+                } catch (e) { /* 取不到就退化 */ }
+            }
+            const blob = await this._rangeDownload(url, total, onProgress, mime);
+            await this._saveBlob(blob, name || fallbackName);
         } catch (e) {
             // 下载失败必须让用户看见 (之前未捕获的 Promise 会静默吞掉, 只留下半个文件)
             const msg = `下载失败：${(e && e.message) || '未知错误'}`;
