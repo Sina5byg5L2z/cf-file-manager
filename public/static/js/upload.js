@@ -720,7 +720,7 @@ const Upload = {
             status.textContent = '✓';
             status.style.color = 'var(--color-success)';
             btn.style.display = 'none';
-            FM.navigate(FM.currentPath);
+            FM.navigate(FM.currentPath, true);
             // 传成功的文件不再占列表位置 → 立即摘掉卡片 (saveState 会把它从 localStorage 去掉)
             this.dropDoneTask(task);
             this.saveState();

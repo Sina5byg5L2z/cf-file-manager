@@ -25,7 +25,9 @@ const FM = {
         this.setupHiddenToggle();
     },
 
-    async navigate(path) {
+    // fresh=true: 写操作成功后的刷新, 让服务端绕过边缘缓存直查 D1
+    // (Cache API 失效只作用于当前数据中心, 其他节点的旧列表要等 TTL 过期)
+    async navigate(path, fresh = false) {
         this.currentPath = path;
         this.page = 1;
         this.selected.clear();
@@ -35,11 +37,13 @@ const FM = {
         if (goUpBtn) goUpBtn.style.display = path ? 'inline-flex' : 'none';
 
         try {
-            const data = await API.listFiles(path);
+            const data = await API.listFiles(path, fresh);
             this.entries = data.entries || [];
             this.render();
         } catch (e) {
             console.error('Failed to list files:', e);
+            // 静默 catch 会让「双击失效的目录」看起来像死机 —— 必须给可见反馈
+            try { Dialog.alert('无法打开目录: ' + (e.message || '未知错误')); } catch (_) { /* ignore */ }
         }
         return this;
     },
@@ -328,8 +332,14 @@ const FM = {
             case 'rename':
                 const newName = await Dialog.prompt('重命名为:', entry.name, { title: '重命名' });
                 if (newName && newName !== entry.name) {
-                    await API.rename(path, newName);
-                    this.navigate(this.currentPath);
+                    try {
+                        await API.rename(path, newName);
+                        this.navigate(this.currentPath, true);
+                    } catch (e) {
+                        // 典型 404: 列表数据过期 (文件已在别处被删/改名/移动), 或目标确实不在了。
+                        // 不 catch 的话错误只会以 Uncaught (in promise) 冒到控制台, 界面上毫无反馈。
+                        Dialog.alert('重命名失败: ' + (e.message || '未知错误') + '\n若文件已不存在, 请刷新页面后重试。');
+                    }
                 }
                 break;
             case 'download':
@@ -343,7 +353,7 @@ const FM = {
                 if (await Dialog.confirm(`确定删除 "${entry.name}"?`, { danger: true, okText: '删除' })) {
                     try {
                         await API.deleteFile(path);
-                        this.navigate(this.currentPath);
+                        this.navigate(this.currentPath, true);
                     } catch (e) {
                         // 后端 409: 该文件被图床引用 (零拷贝共享同一份字节, 删了直链就失效)
                         Dialog.alert('删除失败: ' + (e.message || '未知错误'));
@@ -399,7 +409,7 @@ const FM = {
             try {
                 await API.moveFile(src, target);
                 modal.style.display = 'none';
-                this.navigate(this.currentPath);
+                this.navigate(this.currentPath, true);
             } catch (e) {
                 Dialog.alert('移动失败: ' + (e.message || '未知错误'));
             }
@@ -649,7 +659,7 @@ const FM = {
             try {
                 const r = await API.batchDelete(paths);
                 this.selected.clear();
-                this.navigate(this.currentPath);
+                this.navigate(this.currentPath, true);
                 // 后端逐项返回失败原因 (被图床引用的会被跳过, 不阻断其余项)
                 const errs = (r && r.errors) || [];
                 if (errs.length) Dialog.alert(`以下 ${errs.length} 项未删除：\n` + errs.join('\n'));
@@ -673,7 +683,7 @@ const FM = {
             await API.copyFile(this.clipboardPath, this.currentPath);
             this.clipboardPath = null;
             document.getElementById('btnPaste').style.display = 'none';
-            this.navigate(this.currentPath);
+            this.navigate(this.currentPath, true);
         } catch (e) {
             Dialog.alert('粘贴失败: ' + (e.message || '未知错误'));
         }

@@ -116,9 +116,14 @@ export async function listFiles(req, env, db, url) {
   if (!(await dirExists(db, rel))) return jerr('不是目录', 400);
 
   // 边缘缓存 (写操作会失效); 整目录返回(≤1000条), 排序/过滤/分页均由前端完成
+  // fresh=1: 写操作后前端强制刷新用。Cache API 的 delete() 只作用于当前 colo,
+  // 其他数据中心的旧列表要等 TTL 自然过期 —— 期间用户看到的是改名前的旧文件名,
+  // 对它做任何操作都是 404「文件不存在」。写后首次拉列表绕过读缓存直查 D1,
+  // 并回写覆盖本 colo 缓存; 其余 colo 最多陈旧 60s (TTL)。
   const ck = `L:${rel}`;
+  const fresh = url.searchParams.get('fresh') === '1';
   let data;
-  const hit = await cacheGet(ck);
+  const hit = fresh ? null : await cacheGet(ck);
   if (hit) {
     data = await hit.json();
   } else {
@@ -241,7 +246,7 @@ export async function moveNode(db, env, fromPath, toDir, newName) {
   const SUBTREE = subtreeMatch('path');
   const now = new Date().toISOString();
   const fsStmt = node.is_dir
-    ? db.prepare(`UPDATE fs_nodes SET path = ?2 || substr(path, length(?1) + 1), parent = CASE WHEN path = ?1 THEN ?3 ELSE ?2 || substr(parent, length(?1) + 1) END, modified_at = ?4 WHERE ${SUBTREE}`).bind(from, sp.path, sp.parent, now)
+    ? db.prepare(`UPDATE fs_nodes SET path = ?2 || substr(path, length(?1) + 1), parent = CASE WHEN path = ?1 THEN ?3 ELSE ?2 || substr(parent, length(?1) + 1) END, name = CASE WHEN path = ?1 THEN ?4 ELSE name END, modified_at = ?5 WHERE ${SUBTREE}`).bind(from, sp.path, sp.parent, name, now)
     : db.prepare('UPDATE fs_nodes SET path = ?2, parent = ?3, name = ?4, modified_at = ?5 WHERE path = ?1').bind(from, sp.path, sp.parent, name, now);
 
   // 受影响的文件行与其归属库 (分库后字节可能不在主库)

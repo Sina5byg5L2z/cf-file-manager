@@ -85,8 +85,10 @@ const API = {
     updateStorage(id, patch) { return this.json('PUT', `/api/storage/${id}`, patch); },
 
     // Files
-    listFiles(path = '') {
-        return this.json('GET', `/api/files?path=${encodeURIComponent(path)}`);
+    // fresh: 写操作(改名/删除/移动/上传…)成功后的那次刷新传 true —— 绕过服务端
+    // 边缘缓存直查 D1, 避免其他数据中心的 60s 旧列表导致「文件不存在」404。
+    listFiles(path = '', fresh = false) {
+        return this.json('GET', `/api/files?path=${encodeURIComponent(path)}${fresh ? '&fresh=1' : ''}`);
     },
     // ---- 下载 ----
     // 单次 Range 窗口: 服务端按「参数设置 → 单次下载窗口」封顶, 这里取同一值切段

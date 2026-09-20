@@ -108,7 +108,7 @@
         const name = await Dialog.prompt('文件夹名称:', '', { title: '新建文件夹' });
         if (name) {
             await API.mkdir(FM.currentPath, name);
-            FM.navigate(FM.currentPath);
+            FM.navigate(FM.currentPath, true);
         }
     });
 
