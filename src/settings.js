@@ -21,6 +21,10 @@ const DEFAULTS = {
   // 代价是 CPU: 实测读 ~25~33ms CPU/MiB(D1 行 → 字节反序列化), 平台掐断点约 2.0s CPU
   // (= 60~90MiB), 故 8MiB 留 ~8x 余量。上限 32MiB 是因为超过它单次响应就接近掐断点。
   download_range:  8 * MB,
+  // 直下阈值(字节): 前端对 ≤ 此值的文件走浏览器原生下载(<a download>, 无完整性校验),
+  // 超过走分片校验路径。只允许 DIRECT_TIERS 固定档位, 上限 48MiB —— 单响应 CPU 掐断点
+  // 约 2.0s(实测 25~33ms/MB), 48MB ≈ 1.2~1.6s 留有余量; 64MB 起就有静默截断风险。
+  download_direct: 4 * MB,
   // 歌词: provider 是原文来源, trans_provider 是译文来源(目前只有网易云有译文字段)。
   // netease_base 是自部署 NeteaseCloudMusicApi 的地址 —— 属"用户私有地址",
   // 不随公开的 /api/settings 下发(见 publicOf), 登录态才单独补发。
@@ -46,6 +50,8 @@ const MAX_RULES = 20;
 const RANGE_MAX = 2048 * MB; // 范围防御上限 2GB
 const DOWNLOAD_RANGE_MIN = 1 * MB;
 const DOWNLOAD_RANGE_MAX = 32 * MB;
+// 直下阈值固定档位: 与前端 AppSettings.DIRECT_TIERS 保持一致, 档位外一律回落默认
+const DOWNLOAD_DIRECT_TIERS = [0, MB, 2 * MB, 4 * MB, 8 * MB, 16 * MB, 32 * MB, 48 * MB];
 const LYRICS_PROVIDERS = ['auto', 'lrclib', 'lrc_cx', 'off'];
 const LYRICS_TRANS = ['off', 'netease'];
 const AI_MODEL_DEFAULT = 'Qwen/Qwen3-8B';
@@ -119,6 +125,9 @@ function normalize(input, maxUpload) {
     }
   }
   out.download_range = clampInt(src.download_range, DOWNLOAD_RANGE_MIN, DOWNLOAD_RANGE_MAX, DEFAULTS.download_range);
+  // 直下阈值: 只收固定档位, 防呆 —— 档位外(含 NaN/老库缺键)回落默认 4MiB
+  const dd = parseInt(src.download_direct, 10);
+  out.download_direct = DOWNLOAD_DIRECT_TIERS.includes(dd) ? dd : DEFAULTS.download_direct;
   const lyr = src.lyrics && typeof src.lyrics === 'object' ? src.lyrics : {};
   out.lyrics = {
     enabled: lyr.enabled !== false,

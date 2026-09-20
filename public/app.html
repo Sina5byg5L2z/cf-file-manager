@@ -344,8 +344,13 @@
                         <label>单次下载窗口 (MB，1~32)</label>
                         <input type="number" id="setDownloadRange" min="1" max="32" step="1">
                     </div>
+                    <div class="form-group">
+                        <label>直下阈值（≤ 此值走原生下载）</label>
+                        <select id="setDownloadDirect"></select>
+                    </div>
                 </div>
                 <div class="settings-hint" style="margin-top:-4px">越大请求数越少、下载越快，但单次请求的 CPU 开销线性增长：实测约 25~33ms CPU/MB，超过平台上限的响应会被静默截断。8~16 为推荐区间；调大后页面内下载若遇截断会自动折半重试并给出提示。</div>
+                <div class="settings-hint">「直下阈值」以内的文件由浏览器原生下载：快、文件名可靠，但没有完整性校验；超过的走分片校验路径：三道完整性校验，不过移动端部分浏览器接管 blob 下载时会重命名文件。档位上限 48MB 在平台单响应截断点之下，可放心选择；设为 0 = 所有文件都走分片校验。</div>
                 <div class="settings-hint">设置对所有设备生效；各设备按自身类型自动取对应档位。<span id="setDeviceHint"></span></div>
                 <div class="settings-group">歌词</div>
                 <div class="form-row2">
@@ -422,8 +427,8 @@
     <script src="/static/vendor/marked@15.0.12.min.js"></script>
     <script src="/static/vendor/purify@3.4.15.min.js"></script>
     <script src="/static/js/dialog.js?v=20260917a"></script>
-    <script src="/static/js/api.js?v=20260919f"></script>
-    <script src="/static/js/settings.js?v=20260917d"></script>
+    <script src="/static/js/api.js?v=20260920a"></script>
+    <script src="/static/js/settings.js?v=20260920a"></script>
     <script src="/static/js/storage.js?v=20260918f"></script>
     <script src="/static/js/player.js?v=20260913b"></script>
     <script src="/static/js/lyrics.js?v=20260917d"></script>
@@ -431,10 +436,10 @@
     <script src="/static/js/musicplayer.js?v=20260918b"></script>
     <script src="/static/js/fileicons.js?v=b200724b"></script>
     <script src="/static/js/filemanager.js?v=20260918a"></script>
-    <script src="/static/js/upload.js?v=20260918d"></script>
+    <script src="/static/js/upload.js?v=20260920a"></script>
     <script src="/static/js/preview.js?v=20260915b"></script>
     <script src="/static/js/share.js"></script>
-    <script src="/static/js/imagehost.js?v=20260918d"></script>
+    <script src="/static/js/imagehost.js?v=20260920a"></script>
     <script src="/static/js/app.js"></script>
     <script src="/static/js/theme.js"></script>
 </body>

@@ -295,6 +295,11 @@ const ImageHost = (function() {
                 btn.onclick = () => {
                     task.failed = false;
                     task.paused = false;
+                    // 同 upload.js 的手动重试: 重置自动重试预算 (耗尽后不重置会秒失败)
+                    // 并强制重新 init 与服务端对账 (本地 received 可能与服务端不一致,
+                    // 这正是"点重试没用、重选文件才行"的根因)
+                    task.timeoutRetries = 0;
+                    task.needSync = true;
                     if (status) { status.style.color = ''; status.textContent = task.progress + '%'; }
                     btn.textContent = '暂停';
                     btn.onclick = () => this.togglePause(task.id);

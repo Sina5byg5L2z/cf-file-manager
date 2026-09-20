@@ -220,7 +220,10 @@ const API = {
                 total = probed.total; mime = probed.type; name = probed.name;
             }
             if (!Number.isFinite(total)) throw new Error('读不到文件大小，无法校验完整性');
-            if (total <= 4 * 1024 * 1024) { this._directDownload(url); return; } // 小文件走浏览器原生下载
+            // 直下阈值: 用户可在「参数设置」按固定档位调整 (AppSettings.downloadDirect)。
+            // 防御性兜底: settings.js 未加载/未初始化时回落历史默认 4MiB
+            const directMax = (window.AppSettings && AppSettings.downloadDirect) ? AppSettings.downloadDirect() : 4194304;
+            if (total <= directMax) { this._directDownload(url); return; } // ≤阈值走浏览器原生下载, 超过走分片校验
             // 已知总大小时 MIME/文件名还没拿到; 补一次探测 (失败不阻断下载)
             if (!mime || !name) {
                 try {

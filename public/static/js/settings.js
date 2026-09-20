@@ -10,6 +10,7 @@ const AppSettings = {
         preview_markdown: { mobile: 262144,   desktop: 524288 },
         preview_html:     { mobile: 1048576,  desktop: 5242880 },
         download_range:   8388608,   // 单次下载窗口(字节): 服务端 Range 上限 = 页面内分片下载每段大小
+        download_direct:  4194304,   // 直下阈值: ≤此值走浏览器原生下载(无完整性校验), 档位见 DIRECT_TIERS
         // 歌词: provider=原文来源, trans_provider=译文来源, netease_base=自部署地址(仅登录态下发)
         // ai_*: 「AI 翻译」按钮用的 OpenAI 兼容接口(地址/模型/密钥均可在此配置, 任意厂商)
         lyrics: {
@@ -44,6 +45,15 @@ const AppSettings = {
     downloadRange() {
         const v = parseInt(this.merged().download_range, 10);
         return Number.isFinite(v) && v >= 1048576 ? v : this.defaults.download_range;
+    },
+
+    // 直下阈值固定档位(与 src/settings.js DOWNLOAD_DIRECT_TIERS 一致): 0~48MB, 不开放自由填写。
+    // 上限 48MB 压在平台单响应 CPU 掐断点(约 2.0s ≈ 60~90MB)之下, 档位内直下不会被静默截断。
+    DIRECT_TIERS: [0, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 50331648],
+    // 小文件直下阈值: 老库缺键/异常值一律回落默认 4MiB (与历史行为一致)
+    downloadDirect() {
+        const v = parseInt(this.merged().download_direct, 10);
+        return this.DIRECT_TIERS.includes(v) ? v : 4194304;
     },
 
     // 歌词配置: 未加载/异常时退回默认(全部关闭以外的保守值: 仅原文)
@@ -90,6 +100,10 @@ const SettingsUI = {
     modal: null,
     CHUNK_OPTS: [[65536, '64 KB'], [131072, '128 KB'], [262144, '256 KB'], [524288, '512 KB'], [1048576, '1 MB']],
     CONC_OPTS: [1, 2, 3, 4, 6, 8],
+    DIRECT_OPTS: [
+        [0, '0 · 全部走分片校验'], [1048576, '1 MB'], [2097152, '2 MB'], [4194304, '4 MB（默认）'],
+        [8388608, '8 MB'], [16777216, '16 MB'], [33554432, '32 MB'], [50331648, '48 MB（上限）'],
+    ],
 
     init() {
         if (this._inited) return; // 幂等: 防重复绑定监听器
@@ -284,6 +298,9 @@ const SettingsUI = {
         document.getElementById('setDeviceHint').textContent =
             AppSettings.isMobile ? '当前设备按「移动端」档生效' : '当前设备按「电脑端」档生效';
         this._mb('setDownloadRange').value = String(Math.round(AppSettings.downloadRange() / 1048576 * 100) / 100);
+        const dsel = this._mb('setDownloadDirect');
+        dsel.innerHTML = this.DIRECT_OPTS.map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
+        dsel.value = String(AppSettings.downloadDirect());
         const lyr = AppSettings.lyrics();
         this._mb('setLyricsEnabled').checked = lyr.enabled;
         this._mb('setLyricsProvider').value = lyr.provider;
@@ -367,6 +384,7 @@ const SettingsUI = {
                 preview_markdown: { mobile: readMB('set_preview_markdown_mobile') * 1048576, desktop: readMB('set_preview_markdown_desktop') * 1048576 },
                 preview_html:     { mobile: readMB('set_preview_html_mobile') * 1048576, desktop: readMB('set_preview_html_desktop') * 1048576 },
                 download_range:   Math.round(readMB('setDownloadRange') * 1048576),
+                download_direct:  parseInt(this._mb('setDownloadDirect').value, 10),
                 lyrics:           this.collectLyrics(),
             };
             if (!Number.isFinite(settings.upload_limit.mobile) || !Number.isFinite(settings.upload_limit.desktop)
@@ -376,6 +394,9 @@ const SettingsUI = {
             }
             if (!Number.isFinite(settings.download_range) || settings.download_range < 1048576 || settings.download_range > 33554432) {
                 throw new Error('单次下载窗口需在 1 ~ 32 MB 之间');
+            }
+            if (!AppSettings.DIRECT_TIERS.includes(settings.download_direct)) {
+                throw new Error('直下阈值只允许固定档位（0 ~ 48 MB）');
             }
             await AppSettings.save(settings);
             this._close();

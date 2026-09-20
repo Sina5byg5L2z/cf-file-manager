@@ -359,6 +359,15 @@ const Upload = {
             btn.style.display = '';
             btn.onclick = () => {
                 task.failed = false; task.paused = false;
+                // 手动重试必须做两件事, 否则重试形同虚设:
+                // ① 重置自动重试预算 —— 弹「重试」时 timeoutRetries 往往已耗尽(5),
+                //    不重置的话重试后第一个瞬态错误立即再抛, 表现为"点了秒失败";
+                // ② 强制重新 init 与服务端对账 —— 本地 received 可能与服务端不一致
+                //    (分片已落库但响应被 CPU 超限掐掉 / 合并水位回退), 这正是
+                //    "点重试没用、退出重进重选文件才行"的根因; init 会返回真实
+                //    已传分片, 只补缺失片, 与刷新恢复路径行为一致。
+                task.timeoutRetries = 0;
+                task.needSync = true;
                 if (status) { status.style.color = ''; status.textContent = task.progress + '%'; }
                 btn.textContent = '暂停';
                 btn.onclick = () => Upload.togglePause(task.id);
@@ -735,6 +744,9 @@ const Upload = {
             btn.onclick = () => {
                 task.paused = false;
                 task.failed = false;
+                // 同 markTaskError 的重试: 重置预算 + 强制 init 对账 (见彼处注释)
+                task.timeoutRetries = 0;
+                task.needSync = true;
                 task.progress = Math.round((task.sentChunks / task.totalChunks) * 100);
                 status.style.color = '';
                 status.textContent = task.progress + '%';

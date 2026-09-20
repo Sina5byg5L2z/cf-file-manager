@@ -598,12 +598,23 @@ export async function uploadComplete(req, env, db) {
 
   // 批次区间: 首次从 0 开始, 后续由前端回传上一次的 next
   let start = 0;
-  if (Array.isArray(body.batch) && body.batch.length === 2) {
+  const hasBatch = Array.isArray(body.batch) && body.batch.length === 2;
+  if (hasBatch) {
     start = Math.max(0, parseInt(body.batch[0], 10) || 0);
   }
 
-  // 只有首次请求做一次全量缺失校验 (后续批次暂存行已被搬走, 扫不出完整信息)
-  if (start === 0) {
+  // 合并水位以下的区间绝不重走。重试的 complete 往往从 batch=null(0) 重新开始,
+  // 已合并区间 [0, merged_upto) 的暂存行早已搬走, 重扫是空转, 而末尾
+  // "UPDATE SET merged_upto = end" 会把水位回写退步 —— 一旦后续批次再次失败,
+  // 回退区间的分片既不在暂存键、又不计入水位, 之后每次 complete 都报「缺失分片」,
+  // 死循环到只能 abort 重传 (用户被迫退出重进重选文件才能自愈)。
+  const mergedUpto = session.merged_upto || 0;
+  if (start < mergedUpto) start = mergedUpto;
+
+  // 只有首次请求做一次全量缺失校验 (校验本身已把 [0, merged_upto) 计入已传;
+  // 后续批次的暂存行已被搬走, 扫不出完整信息)。start 被水位抬起后 (merged_upto>0)
+  // 也必须校验: 挡住 stale 状态的客户端漏合并, 缺片让它 400 后走重试补齐。
+  if (!hasBatch || start === 0) {
     const present = await vdb.prepare('SELECT idx FROM blobs WHERE key = ?1').bind(stageKey).all();
     const idxs = new Set((present.results || []).map((r) => r.idx));
     const merged = session.merged_upto || 0;
