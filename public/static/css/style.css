@@ -790,3 +790,33 @@ body.has-upload-launcher .upload-progress{bottom:calc(var(--mp-bar-h, 0px) + 80p
     .mp-offset { padding-top: 8px; margin-top: 8px; gap: 6px; }
     .mp-ofs-label { display: none; }   /* 隐藏"字号"文字, 让 T−/T+ 收进一行 */
 }
+
+/* ================= 上传前压缩弹窗 (compress.js) ================= */
+/* 层级约定: 1180 modal-overlay < 1300 dlg-overlay < 1320 compress-overlay
+   —— 压缩确认是上传的前置阻塞步骤, 压在所有弹窗之上 */
+.compress-overlay{position:fixed;inset:0;background:rgba(15,17,23,0.9);z-index:1320;display:flex;align-items:center;justify-content:center;padding:16px}
+.compress-modal{width:min(560px,100%);display:flex;flex-direction:column;max-height:min(76vh,640px)}
+.compress-modal .modal-body{overflow-y:auto;flex:1 1 auto;min-height:0}
+.compress-footer{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px;border-top:1px solid var(--border);flex:none}
+.compress-footer .btn{min-width:0}
+.cmp-list{margin-top:14px;display:flex;flex-direction:column;gap:8px}
+.cmp-row{border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;background:var(--bg-raised)}
+.cmp-row-main{display:flex;align-items:center;gap:8px;min-width:0}
+.cmp-row-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.cmp-row-size{flex:none;color:var(--text-tertiary);font-size:12px;font-variant-numeric:tabular-nums}
+.cmp-badge{flex:none;font-size:11px;padding:1px 7px;border-radius:9px;white-space:nowrap}
+.cmp-badge-ok{background:rgba(63,185,80,.15);color:#3fb950}
+.cmp-badge-warn{background:rgba(210,153,34,.15);color:#d29922}
+.cmp-badge-err{background:rgba(248,81,73,.15);color:var(--color-error)}
+.cmp-row-sub{margin-top:5px;font-size:12px;color:var(--text-tertiary);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.cmp-row-bar{margin-top:6px;height:4px;border-radius:2px;background:var(--bg-base);overflow:hidden}
+.cmp-row-bar-fill{height:100%;width:0;background:var(--color-primary,#3b82f6);transition:width .2s}
+.cmp-check{display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--text-primary)}
+.cmp-check input{width:auto;margin:0}
+.cmp-result{font-variant-numeric:tabular-nums}
+.cmp-warn{color:#d29922}
+.cmp-err{color:var(--color-error)}
+@media (max-width:600px){
+    .compress-footer{flex-wrap:wrap}
+    .compress-footer .btn{flex:1 1 auto}
+}

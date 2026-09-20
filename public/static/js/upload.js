@@ -139,6 +139,10 @@ const Upload = {
                 chunkSize: t.chunkSize,
                 concurrent: t.concurrent,
                 fileKey: t.fileKey,
+                // 压缩产物: OPFS 缓存名 + mime。恢复时按 lastModified (压缩时刻) 重建 File,
+                // 指纹才能与服务端续传会话对上
+                cacheName: t.compressCache || null,
+                cType: t.cType || (t.file ? (t.file.type || '') : ''),
                 needsFile: !t.file,     // 刷新后无 File 句柄, 需要用户重新选择
                 done: !!t.done,
                 failed: !!t.failed,
@@ -280,20 +284,61 @@ const Upload = {
                 concurrent: s.concurrent, timeoutRetries: 0,
                 fileKey: s.fileKey, needsFile: true,
                 received: null, inflight: null, hashes: {},
+                compressCache: s.cacheName || null, cType: s.cType || '',
             };
             this.tasks.push(task);
             this.renderItem(list, task);
-            this.markNeedsFile(task);
+            if (s.cacheName && window.Compress) {
+                // 压缩产物缓存在 OPFS: 直接取回, 无需用户重选 —— 重选原文件也对不上
+                // 指纹 (大小/修改时间都变了), 缓存是唯一能续传的路径
+                window.Compress.restoreCachedFile(s.name, s.cacheName, s.cType, s.lastModified).then((f) => {
+                    if (f && f.size === (s.size || 0)) {
+                        task.file = f;
+                        task.needsFile = false;
+                        const el = document.getElementById('upload-' + task.id);
+                        const btn = el && el.querySelector('.upload-pause-btn');
+                        if (btn) { btn.textContent = '继续'; btn.onclick = () => Upload.togglePause(task.id); }
+                    } else {
+                        this.markCacheLost(task);
+                    }
+                });
+            } else {
+                this.markNeedsFile(task);
+            }
         }
         this.updateLauncher();
     },
 
+    // 压缩任务的 OPFS 缓存丢失 (浏览器清理存储): 压缩产物在磁盘上不存在,
+    // 用户重选任何文件都无法匹配指纹, 只能提示重新上传。保留删除按钮清理残留。
+    markCacheLost(task) {
+        task.failed = true;
+        const el = document.getElementById('upload-' + task.id);
+        if (!el) return;
+        const status = el.querySelector('.upload-item-status');
+        const btn = el.querySelector('.upload-pause-btn');
+        if (status) {
+            status.textContent = '✗ 压缩缓存已丢失';
+            status.style.color = 'var(--color-error)';
+            status.title = '浏览器本地缓存已被清除，请重新选择原文件上传（会重新压缩）';
+        }
+        if (btn) btn.style.display = 'none';
+        this.refreshHeader();
+    },
+
     // ---------------- 入口: 选择文件上传 ----------------
     async uploadFiles(fileList, path) {
-        // 单文件上限按当前设备类型取对应档位 (服务端 MAX_UPLOAD_SIZE 是最终兜底)
+        // 上传前压缩 (绝不静默): 有可压缩文件时必弹窗让用户选档位, 逐文件确认后才继续。
+        // 返回 null = 用户取消; 返回数组 = 最终要传的文件 (可能含压缩产物, 可能原样)。
+        let picked = [...fileList];
+        if (window.CompressUI) {
+            picked = await window.CompressUI.maybeCompress(picked);
+            if (!picked || !picked.length) return;
+        }
+        // 超限过滤按压缩后的尺寸执行: 压缩可能把原本超限的文件压回限内
         const limit = AppSettings.uploadLimit();
-        const oversized = [...fileList].filter(f => f.size > limit);
-        const files = [...fileList].filter(f => f.size <= limit);
+        const oversized = picked.filter(f => f.size > limit);
+        const files = picked.filter(f => f.size <= limit);
         if (oversized.length) {
             const names = oversized.map(f => f.name).join('、');
             const mb = Math.round(limit / 1048576 * 100) / 100;
@@ -402,6 +447,9 @@ const Upload = {
             uploadId: null, totalChunks, sentChunks: 0, failed: false, done: false,
             chunkSize, concurrent: rule.concurrent, timeoutRetries: 0,
             fileKey, received: null, inflight: null, hashes: {},
+            // 压缩产物标记: 非空 = 该文件是本地压缩产物, 内容同时缓存在 OPFS (刷新后可恢复)
+            compressCache: file.compressCache || null,
+            cType: file.type || '',
         };
         this.tasks.push(task);
         this.renderItem(list, task);
@@ -444,6 +492,9 @@ const Upload = {
         task.paused = true;
         this.tasks = this.tasks.filter((t) => t !== task);
         if (el) el.remove();
+        if (task.compressCache && window.Compress) {
+            window.Compress.deleteCachedFile(task.compressCache); // OPFS 里的压缩产物一并清掉
+        }
         this.saveState();             // saveState 会把已移除的任务从 localStorage 去掉
         // 面板里已无任务 → 自动收起。先收面板再刷入口按钮: 反过来的话
         // updateLauncher 会以为面板还开着, 把按钮一起藏掉。
@@ -464,6 +515,10 @@ const Upload = {
         const el = document.getElementById('upload-' + task.id);
         if (el) el.remove();
         this.tasks = this.tasks.filter((t) => t !== task);
+        // 传完了, OPFS 里的压缩产物不再有用, 释放掉
+        if (task.compressCache && window.Compress) {
+            window.Compress.deleteCachedFile(task.compressCache);
+        }
     },
 
     // 刷新页面后恢复的任务: 无 File 句柄, 提示用户重新选择

@@ -40,6 +40,15 @@ const DEFAULTS = {
     ai_base: 'https://api.siliconflow.cn/v1',
     ai_key: '',
   },
+  // 上传前本地压缩(2026-09-20): 只控制"是否弹窗+默认档位", 压缩本身全部在浏览器完成,
+  // 服务端不参与。分辨率值是档位字符串(与前端 select 的 value 一致): 图片按长边,
+  // 视频按短边; 'original' = 保持原尺寸(此时仍可重编码降码率)。
+  compress: {
+    enabled: true,
+    img_res: 'original',
+    vid_res: 'original',
+    quality: 'high',
+  },
 };
 
 const DEVICE_KEYS = ['mobile', 'desktop'];
@@ -54,6 +63,10 @@ const DOWNLOAD_RANGE_MAX = 32 * MB;
 const DOWNLOAD_DIRECT_TIERS = [0, MB, 2 * MB, 4 * MB, 8 * MB, 16 * MB, 32 * MB, 48 * MB];
 const LYRICS_PROVIDERS = ['auto', 'lrclib', 'lrc_cx', 'off'];
 const LYRICS_TRANS = ['off', 'netease'];
+// 压缩档位: 与前端 compress.js 的 IMG_RES_TIERS / VID_RES_TIERS 保持一致
+const CMP_IMG_RES = ['original', '4096', '2560', '1920', '1280', '854'];
+const CMP_VID_RES = ['original', '1080', '720', '480', '360'];
+const CMP_QUALITY = ['high', 'medium', 'low'];
 const AI_MODEL_DEFAULT = 'Qwen/Qwen3-8B';
 const AI_BASE_DEFAULT = 'https://api.siliconflow.cn/v1';
 const AI_MODEL_MAX = 120;
@@ -138,6 +151,14 @@ function normalize(input, maxUpload) {
     ai_model: normAiModel(lyr.ai_model),
     ai_base: normAiBase(lyr.ai_base),
     ai_key: String(lyr.ai_key || '').trim().slice(0, 300),
+  };
+  // 压缩: 档位外的值(含老库缺键)一律回落默认, 防呆与 download_direct 同思路
+  const cmp = src.compress && typeof src.compress === 'object' ? src.compress : {};
+  out.compress = {
+    enabled: cmp.enabled !== false,
+    img_res: CMP_IMG_RES.includes(cmp.img_res) ? cmp.img_res : DEFAULTS.compress.img_res,
+    vid_res: CMP_VID_RES.includes(cmp.vid_res) ? cmp.vid_res : DEFAULTS.compress.vid_res,
+    quality: CMP_QUALITY.includes(cmp.quality) ? cmp.quality : DEFAULTS.compress.quality,
   };
   return out;
 }

@@ -20,7 +20,7 @@
             } catch (e) { /* 隐私模式等场景下保持默认暗色 */ }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260919a">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260920a">
     <link rel="stylesheet" href="/static/vendor/katex/katex@0.16.9.min.css">
     <link rel="stylesheet" id="hljsDark" href="/static/vendor/hljs/styles/github-dark@11.9.0.min.css">
     <link rel="stylesheet" id="hljsLight" href="/static/vendor/hljs/styles/github-light@11.9.0.min.css" disabled>
@@ -410,6 +410,47 @@
                     </label>
                 </div>
                 <div class="settings-hint">任何 OpenAI 兼容接口均可，改地址 / 模型名 / 密钥后保存即生效，无需重新部署。常用厂商（接口地址 → 模型名示例）：<br>· 硅基流动 <code>https://api.siliconflow.cn/v1</code> → Qwen/Qwen3-8B（有免费额度）<br>· 智谱 GLM <code>https://open.bigmodel.cn/api/paas/v4</code> → glm-4.7-flash（免费）/ glm-5.1<br>· DeepSeek <code>https://api.deepseek.com</code> → deepseek-v4-flash / deepseek-v4-pro<br>· Kimi <code>https://api.moonshot.cn/v1</code> → kimi-k2 系列；· 阿里百炼 <code>https://dashscope.aliyuncs.com/compatible-mode/v1</code> → qwen 系列；· OpenRouter <code>https://openrouter.ai/api/v1</code>（一个 Key 通多家模型）。<br>密钥保存在服务端配置中，不下发给未登录访客；留空则回落服务端环境变量 <code>SILLICONFLOW_API_KEY</code>。翻译按每次约 40 行分批请求，失败会自动拆分重试。</div>
+                <div class="settings-group">上传前压缩</div>
+                <div class="form-row2">
+                    <div class="form-group">
+                        <label>图片分辨率（约束长边）</label>
+                        <select id="setCmpImgRes">
+                            <option value="original">保持原图尺寸</option>
+                            <option value="4096">限制长边 4K</option>
+                            <option value="2560">限制长边 2K</option>
+                            <option value="1920">限制长边 1080P</option>
+                            <option value="1280">限制长边 720P</option>
+                            <option value="854">限制长边 480P</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>视频分辨率（约束短边）</label>
+                        <select id="setCmpVidRes">
+                            <option value="original">保持原视频尺寸</option>
+                            <option value="1080">1080P</option>
+                            <option value="720">720P</option>
+                            <option value="480">480P</option>
+                            <option value="360">360P</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-row2">
+                    <div class="form-group">
+                        <label>画质</label>
+                        <select id="setCmpQuality">
+                            <option value="high">高质量</option>
+                            <option value="medium">均衡</option>
+                            <option value="low">高压缩</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>&nbsp;</label>
+                        <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;padding-top:6px">
+                            <input type="checkbox" id="setCmpEnabled" checked style="width:auto"> 启用上传前压缩
+                        </label>
+                    </div>
+                </div>
+                <div class="settings-hint">上传图片 / 视频时先弹窗确认分辨率与画质再压缩，全程在浏览器本地完成（视频优先 GPU 硬件编码，WebCodecs 不可用时自动降级）；压缩结果逐文件确认后才上传，绝不静默替换原文件。关闭后直接上传原文件。此处是弹窗中的默认档位，每次上传时仍可临时更改。</div>
                 <div class="settings-group">存储库（文件内容分库存储）</div>
                 <div id="storagePanel" class="storage-panel"><div class="storage-loading">加载中…</div></div>
                 <div class="settings-hint">元数据（目录结构、图床、分享）始终在主库；文件内容按「一个文件的全部字节落在同一个库」的规则分散存储。D1 免费版单库上限 500MB，账号最多 10 个库。</div>
@@ -436,7 +477,8 @@
     <script src="/static/js/musicplayer.js?v=20260918b"></script>
     <script src="/static/js/fileicons.js?v=b200724b"></script>
     <script src="/static/js/filemanager.js?v=20260920b"></script>
-    <script src="/static/js/upload.js?v=20260920b"></script>
+    <script src="/static/js/compress.js?v=20260920a"></script>
+    <script src="/static/js/upload.js?v=20260920c"></script>
     <script src="/static/js/preview.js?v=20260915b"></script>
     <script src="/static/js/share.js"></script>
     <script src="/static/js/imagehost.js?v=20260920a"></script>

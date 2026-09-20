@@ -214,15 +214,22 @@ const ImageHost = (function() {
         // 与 upload.js 同一套协议: 算 file_key 指纹 → 服务端命中未完成会话则复用, 只补缺失分片。
         // 关键差异: 任务与 File 句柄解耦 —— 句柄只活在内存里, 元数据落 localStorage。
         // 刷新/关页面后任务是"待继续"状态, 重选同一个文件就能接着传 (不是从头传)。
-        handleFiles: function(fileList) {
+        handleFiles: async function(fileList) {
             const listEl = document.getElementById('ihUploadList');
             if (!listEl) return;
+            // 上传前压缩 (绝不静默): 与文件上传同一套弹窗, 取消 = 整批不上传。
+            // await 期间用户可能重复触发, maybeCompress 内部有 _activePromise 排队。
+            let picked = [...fileList];
+            if (window.CompressUI) {
+                picked = await window.CompressUI.maybeCompress(picked);
+                if (!picked || !picked.length) return;
+            }
             listEl.style.display = 'block';
             this.syncListDom();          // 不清空已有任务: 命中同源文件就复用, 其余保留
-            for (const file of fileList) {
+            for (const file of picked) {
                 // 必须 await + catch: addFile 里要算指纹 (依赖 crypto.subtle),
                 // 一旦抛错没人接, 任务既不在列表里也无提示, 用户只看到"点了没反应"
-                this.addFile(file, listEl, fileList.length).catch((e) => this.markFailed(file, e));
+                this.addFile(file, listEl, picked.length).catch((e) => this.markFailed(file, e));
             }
         },
 
@@ -251,6 +258,9 @@ const ImageHost = (function() {
                 result: null, chunkSize: IH_CHUNK_SIZE, concurrent: IH_CONCURRENT,
                 timeoutRetries: 0, fileKey, needsFile: false, failed: false, done: false,
                 batchSize: batchSize || 1,
+                // 压缩产物标记: 非空 = 本地压缩产物, 内容同时缓存在 OPFS (刷新后可恢复)
+                compressCache: file.compressCache || null,
+                cType: file.type || '',
             };
             uploadTasks.push(task);
             this.renderUploadItem(list, task);
@@ -331,6 +341,9 @@ const ImageHost = (function() {
             task.paused = true;
             uploadTasks = uploadTasks.filter((t) => t !== task);
             if (el) el.remove();
+            if (task.compressCache && window.Compress) {
+                window.Compress.deleteCachedFile(task.compressCache); // OPFS 压缩产物一并清掉
+            }
             this.saveState();
             this.refreshHeader();
             // 清服务端会话与暂存分片 (失败不阻塞 UI: 24h 后定时任务也会回收)
@@ -406,6 +419,9 @@ const ImageHost = (function() {
                     id: t.id, name: t.name, size: t.size, lastModified: t.lastModified,
                     uploadId: t.uploadId, totalChunks: t.totalChunks, sentChunks: t.sentChunks,
                     chunkSize: t.chunkSize, concurrent: t.concurrent, fileKey: t.fileKey,
+                    // 压缩产物: OPFS 缓存名 + mime (恢复时按 lastModified 重建 File 保指纹)
+                    cacheName: t.compressCache || null,
+                    cType: t.cType || (t.file ? (t.file.type || '') : ''),
                     needsFile: !t.file, failed: !!t.failed, paused: !!t.paused,
                 }));
                 localStorage.setItem(IH_STORE_KEY, JSON.stringify(snap));
@@ -455,10 +471,26 @@ const ImageHost = (function() {
                     timeoutRetries: 0, fileKey: s.fileKey || '', needsFile: true,
                     failed: !!s.failed, done: false, batchSize: 0,
                     received: null, inflight: null, hashes: {}, result: null,
+                    compressCache: s.cacheName || null, cType: s.cType || '',
                 };
                 uploadTasks.push(task);
                 this.renderUploadItem(listEl, task);
-                this.markNeedsFile(task);
+                if (s.cacheName && window.Compress) {
+                    // 压缩产物缓存在 OPFS: 直接取回, 重选原文件对不上指纹 (大小/时间都变了)
+                    window.Compress.restoreCachedFile(s.name, s.cacheName, s.cType, s.lastModified).then((f) => {
+                        if (f && f.size === (s.size || 0)) {
+                            task.file = f;
+                            task.needsFile = false;
+                            const el = document.getElementById('ih-upload-' + task.id);
+                            const btn = el && el.querySelector('.ih-upload-pause-btn');
+                            if (btn) { btn.textContent = '继续'; btn.onclick = () => this.togglePause(task.id); }
+                        } else {
+                            this.markCacheLost(task);
+                        }
+                    });
+                } else {
+                    this.markNeedsFile(task);
+                }
             }
             this.syncListDom();
             this.refreshHeader();
@@ -479,6 +511,23 @@ const ImageHost = (function() {
                 btn.textContent = '选择文件';
                 btn.onclick = () => this.pickFileFor(task);
             }
+        },
+
+        // 压缩任务的 OPFS 缓存丢失 (浏览器清理存储): 压缩产物在磁盘上不存在,
+        // 用户重选任何文件都无法匹配指纹, 只能提示重新上传。保留删除按钮清理残留。
+        markCacheLost: function(task) {
+            task.failed = true;
+            const el = document.getElementById('ih-upload-' + task.id);
+            if (!el) return;
+            const status = el.querySelector('.ih-upload-status');
+            const btn = el.querySelector('.ih-upload-pause-btn');
+            if (status) {
+                status.textContent = '✗ 压缩缓存已丢失';
+                status.style.color = 'var(--color-error)';
+                status.title = '浏览器本地缓存已被清除，请重新选择原文件上传（会重新压缩）';
+            }
+            if (btn) btn.style.display = 'none';
+            this.refreshHeader();
         },
 
         // 为恢复的任务重新指定文件 (必须选同一个文件, 否则与已传分片对不上)

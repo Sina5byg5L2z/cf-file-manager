@@ -17,6 +17,8 @@ const AppSettings = {
             enabled: true, provider: 'auto', trans_provider: 'off', netease_base: '',
             ai_enabled: false, ai_model: 'Qwen/Qwen3-8B', ai_base: 'https://api.siliconflow.cn/v1', ai_key: '',
         },
+        // 上传前压缩默认档位(与服务端 DEFAULTS.compress / compress.js 的 TIERS 一致)
+        compress: { enabled: true, img_res: 'original', vid_res: 'original', quality: 'high' },
     },
 
     data: null,        // 服务端加载成功后的完整设置; null = 未加载(用默认)
@@ -74,6 +76,19 @@ const AppSettings = {
 
     // 供播放器判断要不要显示「AI 翻译」按钮
     aiTranslateOn() { return this.lyrics().ai_enabled === true; },
+
+    // 上传前压缩配置: 未加载/异常时退回默认(enabled=true, 全原图/高质量)
+    compressCfg() {
+        const c = this.merged().compress;
+        if (!c || typeof c !== 'object') return this.defaults.compress;
+        const one = (v, ok, dflt) => (ok.includes(String(v)) ? String(v) : dflt);
+        return {
+            enabled: c.enabled !== false,
+            img_res: one(c.img_res, ['original', '4096', '2560', '1920', '1280', '854'], 'original'),
+            vid_res: one(c.vid_res, ['original', '1080', '720', '480', '360'], 'original'),
+            quality: one(c.quality, ['high', 'medium', 'low'], 'high'),
+        };
+    },
 
     // 用原生 fetch (管理页/分享页通用; 分享页无 api.js 与 token, GET 本就是公开接口)
     load() {
@@ -317,6 +332,11 @@ const SettingsUI = {
                 this._mb('setAiKey').type = keyShow.checked ? 'text' : 'password';
             });
         }
+        const cmp = AppSettings.compressCfg();
+        this._mb('setCmpEnabled').checked = cmp.enabled;
+        this._mb('setCmpImgRes').value = cmp.img_res;
+        this._mb('setCmpVidRes').value = cmp.vid_res;
+        this._mb('setCmpQuality').value = cmp.quality;
         document.getElementById('setError').style.display = 'none';
         this.modal.style.display = 'flex';
         // 存储分库面板 (库清单 / 名额 / 一键扩容) 随设置弹窗一起加载
@@ -386,6 +406,12 @@ const SettingsUI = {
                 download_range:   Math.round(readMB('setDownloadRange') * 1048576),
                 download_direct:  parseInt(this._mb('setDownloadDirect').value, 10),
                 lyrics:           this.collectLyrics(),
+                compress: {
+                    enabled: this._mb('setCmpEnabled').checked,
+                    img_res: this._mb('setCmpImgRes').value,
+                    vid_res: this._mb('setCmpVidRes').value,
+                    quality: this._mb('setCmpQuality').value,
+                },
             };
             if (!Number.isFinite(settings.upload_limit.mobile) || !Number.isFinite(settings.upload_limit.desktop)
                 || Object.values(settings.preview_text).concat(Object.values(settings.preview_markdown), Object.values(settings.preview_html))
