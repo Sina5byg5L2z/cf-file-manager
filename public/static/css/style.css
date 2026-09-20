@@ -809,6 +809,7 @@ body.has-upload-launcher .upload-progress{bottom:calc(var(--mp-bar-h, 0px) + 80p
 .cmp-badge-warn{background:rgba(210,153,34,.15);color:#d29922}
 .cmp-badge-err{background:rgba(248,81,73,.15);color:var(--color-error)}
 .cmp-row-sub{margin-top:5px;font-size:12px;color:var(--text-tertiary);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.cmp-row-est{color:var(--text-secondary);font-variant-numeric:tabular-nums}
 .cmp-row-bar{margin-top:6px;height:4px;border-radius:2px;background:var(--bg-base);overflow:hidden}
 .cmp-row-bar-fill{height:100%;width:0;background:var(--color-primary,#3b82f6);transition:width .2s}
 .cmp-check{display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;color:var(--text-primary)}

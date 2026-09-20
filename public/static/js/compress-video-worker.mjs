@@ -12,7 +12,7 @@
 //       {id, type:'done',     data}         // {size, buffer?, codec, engine, cacheName}
 //       {id, type:'error',    message, code}
 // 取消: 主线程直接 terminate 本 worker + 清 OPFS 残留, 无需优雅协议。
-import { probeVideo, convertVideo } from './compress-core.mjs?v=20260920a';
+import { probeVideo, convertVideo } from './compress-core.mjs?v=20260920d';
 
 // OPFS 流式写入。makeWritable 语义: 每次调用返回「从 0 开始的全新 WritableStream」
 // (转码内核硬件失败会换软件偏好重试, Output/WritableStream 都不可复用, 所以必须可重开)。

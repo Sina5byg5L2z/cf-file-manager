@@ -65,6 +65,21 @@
         return clamp(Math.round(w * h * fps * bpp), 200000, 24000000);
     }
 
+    // 预估压缩后大小 (视频): 探测到的尺寸/帧率/时长套输出码率公式,
+    // 与 compress-core.mjs convertVideo 的 estOut 完全同源 (视频轨公式码率 + 128k 音轨),
+    // probe 数据齐全时估算相当准; probe 失败或缺时长返回 null (不显示)。
+    const AUDIO_BITRATE = 128000;
+    function estimateVideoBytes(probe, vidMaxEdge, quality) {
+        if (!probe || !probe.ok || !probe.width || !probe.height || !(probe.durationSec > 0)) return null;
+        const d = vidDims(probe.width, probe.height, vidMaxEdge | 0);
+        const tw = d ? (d.width || probe.width) : probe.width;
+        const th = d ? (d.height || probe.height) : probe.height;
+        const fps = clamp(Math.round(probe.fps || 30), 1, 60);
+        const vBit = vidBitrate(tw, th, fps, quality);
+        const aBit = probe.hasAudio ? AUDIO_BITRATE : 0;
+        return Math.round((vBit + aBit) / 8 * probe.durationSec);
+    }
+
     // ---------------- 设置 ----------------
     function getCfg() {
         try {
@@ -124,7 +139,7 @@
         if (workerBroken) return null;
         if (vidWorker) return vidWorker;
         try {
-            vidWorker = new Worker('/static/js/compress-video-worker.mjs?v=20260920a', { type: 'module' });
+            vidWorker = new Worker('/static/js/compress-video-worker.mjs?v=20260920d', { type: 'module' });
             vidWorker.onmessage = (e) => {
                 const { id, type, data, p, message, code } = e.data || {};
                 const job = jobs.get(id);
@@ -164,7 +179,7 @@
     // 主线程兜底 (无 module worker 的老浏览器): 动态 import 同一份内核
     let corePromise = null;
     function loadCore() {
-        if (!corePromise) corePromise = import('/static/js/compress-core.mjs?v=20260920a');
+        if (!corePromise) corePromise = import('/static/js/compress-core.mjs?v=20260920d');
         return corePromise;
     }
 
@@ -522,24 +537,73 @@
     }
 
     // ---------------- 探测 (弹窗展示用) ----------------
+    // 兜底: <video> 元素探测。下载工具/录屏软件产出的 "mp4" 常是非标准封装
+    // (ts/flv/m4s 拼接改名), JS 解封装层 (mediabunny) 读不动, 但浏览器 media stack
+    // 可能仍能播 → 能拿到宽高/时长就足够出预估 (帧率拿不到, 按 30 估)。
+    function probeViaVideoElement(file) {
+        return new Promise((res) => {
+            const url = URL.createObjectURL(file);
+            const v = document.createElement('video');
+            v.preload = 'metadata';
+            v.playsInline = true;
+            let settled = false;
+            let timer = null;
+            const done = (r) => {
+                if (settled) return;
+                settled = true;
+                if (timer) clearTimeout(timer);
+                v.removeAttribute('src');
+                try { v.load(); } catch { /* 已清 */ }
+                URL.revokeObjectURL(url);
+                res(r);
+            };
+            timer = setTimeout(() => done(null), 8000);
+            v.onloadedmetadata = () => {
+                const w = v.videoWidth, h = v.videoHeight, dur = v.duration;
+                if (!w || !h || !isFinite(dur) || !(dur > 0)) { done(null); return; }
+                done({
+                    ok: true, via: 'video-element',
+                    width: w, height: h,
+                    fps: 30,        // 元数据层无帧率, 按 30 估 (仅用于码率公式, 偏差有限)
+                    durationSec: dur,
+                    hasAudio: true, // 元数据层判不出音轨, 按有音轨估 (偏差上限 16KB/s)
+                    codec: '', srcBitrate: 0,
+                });
+            };
+            v.onerror = () => done(null);
+            v.src = url;
+        });
+    }
     async function probeVideoMeta(file) {
-        // worker 在 → worker 探; 否则主线程 core 探。两者都失败 = 容器浏览器解不动
+        // worker 在 → worker 探; 否则主线程 core 探。两者都失败 = JS 解封装层不支持该容器
         const w = getWorker();
+        let r;
         if (w) {
             try {
-                const data = await workerCall({ cmd: 'probe', file }, null);
-                return data;
-            } catch { return { ok: false, reason: 'probe-failed' }; }
+                r = await workerCall({ cmd: 'probe', file }, null);
+            } catch { r = { ok: false, reason: 'probe-failed' }; }
+        } else {
+            try {
+                const core = await loadCore();
+                r = await core.probeVideo(file);
+            } catch { r = { ok: false, reason: 'probe-failed' }; }
         }
-        try {
-            const core = await loadCore();
-            return await core.probeVideo(file);
-        } catch { return { ok: false, reason: 'probe-failed' }; }
+        if (r && r.ok) return r;
+        const v = await probeViaVideoElement(file);
+        return v || r; // <video> 也解不动 → 维持失败结论
     }
 
     // ---------------- 压缩入口 ----------------
     async function compressOne(entry, opts, onProgress, signal) {
-        if (entry.kind === 'image') return compressImage(entry.file, opts);
+        if (entry.kind === 'image') {
+            // 弹窗阶段已在同档位下真实预压过 → 直接复用结果, 不重复算
+            if (entry.preview && entry.previewOpts
+                && entry.previewOpts.imgMaxEdge === opts.imgMaxEdge
+                && entry.previewOpts.quality === opts.quality) {
+                return entry.preview;
+            }
+            return compressImage(entry.file, opts);
+        }
         return compressVideoAuto(entry, opts, onProgress, signal);
     }
 
@@ -646,6 +710,90 @@
                 vidSel.value = VID_RES_TIERS.some(([v]) => v === cfg.vid_res) ? cfg.vid_res : 'original';
                 qSel.value = ['high', 'medium', 'low'].includes(cfg.quality) ? cfg.quality : 'high';
 
+                // ---- 预估 ----
+                // 视频: estimateVideoBytes 纯公式 (probe 数据到位即可算);
+                // 图片: 真实预压缩 (canvas 毫秒级), 比 CMYK/EXIF 等公式猜测准得多,
+                //       "开始压缩"时若档位未变直接复用预压结果 (见 compressOne)。
+                function currentOpts() {
+                    return {
+                        imgMaxEdge: imgSel.value === 'original' ? 0 : parseInt(imgSel.value, 10),
+                        vidMaxEdge: vidSel.value === 'original' ? 0 : parseInt(vidSel.value, 10),
+                        quality: qSel.value,
+                    };
+                }
+                let previewSeq = 0;      // 代次: 档位变更/开始压缩时 +1, 在途预压结果作废
+                let previewBusy = false;
+                let previewOpts = null;  // 预压使用的档位快照 {imgMaxEdge, quality}
+                const previewQueue = [];
+                function schedulePreview(en) {
+                    en.preview = null;
+                    en.previewOpts = null; // null = 预压排队/进行中
+                    en.previewFailed = false;
+                    en.previewSeq = previewSeq;
+                    previewQueue.push(en);
+                    pumpPreview();
+                }
+                async function pumpPreview() {
+                    if (previewBusy) return;
+                    previewBusy = true;
+                    try {
+                        while (previewQueue.length) {
+                            const en = previewQueue.shift();
+                            if (en.previewSeq !== previewSeq) continue; // 档位已变, 作废
+                            try {
+                                const r = await compressImage(en.file, previewOpts);
+                                if (en.previewSeq !== previewSeq) continue; // 完成时已换档, 丢弃
+                                en.preview = r;
+                                en.previewOpts = { imgMaxEdge: previewOpts.imgMaxEdge, quality: previewOpts.quality };
+                            } catch {
+                                if (en.previewSeq === previewSeq) en.previewFailed = true; // 预压失败 → 明示, 不留空白
+                            }
+                            renderEstimate(en);
+                        }
+                    } finally {
+                        previewBusy = false;
+                    }
+                }
+                function estText(fileSize, outSize) {
+                    const pct = fileSize ? Math.round((fileSize - outSize) / fileSize * 100) : 0;
+                    return `预估 ≈ ${fmtSize(outSize)}（${pct > 0 ? `省 ${pct}%` : '压缩无收益'}）`;
+                }
+                // 只更新 .cmp-row-est; running/result 阶段 sub 被接管 (查不到该 span) → 直接返回
+                function renderEstimate(en) {
+                    if (phase !== 'settings' || !en.row || !en.row.isConnected) return;
+                    const est = en.row.querySelector('.cmp-row-sub .cmp-row-est');
+                    if (!est) return;
+                    if (en.kind === 'image') {
+                        if (en.preview) est.textContent = estText(en.file.size, en.preview.size);
+                        else if (en.previewFailed) est.textContent = '无法预估';
+                        else if (en.previewOpts === null) est.textContent = '预估中…';
+                        else est.textContent = '';
+                        return;
+                    }
+                    // 视频: 探测失败 (浏览器/mediabunny 解不动的容器) → 明示无法预估, 不留空白
+                    if (en.probe && en.probe.ok === false) { est.textContent = '无法预估'; return; }
+                    const o = currentOpts();
+                    const bytes = estimateVideoBytes(en.probe, o.vidMaxEdge, o.quality);
+                    est.textContent = bytes != null ? estText(en.file.size, bytes) : '';
+                }
+                function onTierChange() {
+                    previewSeq++;
+                    previewQueue.length = 0;
+                    const o = currentOpts();
+                    previewOpts = { imgMaxEdge: o.imgMaxEdge, quality: o.quality };
+                    for (const en of entries) {
+                        if (en.kind === 'image') schedulePreview(en);
+                        renderEstimate(en); // 视频行估算随档位即时刷新
+                    }
+                }
+                imgSel.addEventListener('change', onTierChange);
+                vidSel.addEventListener('change', onTierChange);
+                qSel.addEventListener('change', onTierChange);
+                {
+                    const o0 = currentOpts();
+                    previewOpts = { imgMaxEdge: o0.imgMaxEdge, quality: o0.quality };
+                }
+
                 // ---- 行渲染 ----
                 function badgeFor(en) {
                     if (en.kind === 'image') return '<span class="cmp-badge cmp-badge-ok">本地重编码</span>';
@@ -653,6 +801,12 @@
                     if (p && p.ok === false) {
                         // mediabunny 解不了的容器 (avi/wmv/flv/HEVC 无扩展)
                         if (canWebCodecs()) return '<span class="cmp-badge cmp-badge-warn">FFmpeg 兜底（较慢）</span>';
+                        return '<span class="cmp-badge cmp-badge-warn">FFmpeg 兜底（需加载约 30MB）</span>';
+                    }
+                    if (p && p.via === 'video-element') {
+                        // JS 解封装不支持 → WebCodecs 管线 (走 mediabunny) 必然失败,
+                        // 实际引擎只会是 <video> 重录或 FFmpeg, 徽标如实反映
+                        if (mediaRecorderMime()) return '<span class="cmp-badge cmp-badge-warn">兼容模式（实时重录）</span>';
                         return '<span class="cmp-badge cmp-badge-warn">FFmpeg 兜底（需加载约 30MB）</span>';
                     }
                     if (canWebCodecs()) return '<span class="cmp-badge cmp-badge-ok">WebCodecs</span>';
@@ -670,7 +824,7 @@
                             ${badgeFor(en)}
                             ${overLimit ? '<span class="cmp-badge cmp-badge-err">超过上传上限</span>' : ''}
                         </div>
-                        <div class="cmp-row-sub"></div>
+                        <div class="cmp-row-sub"><span class="cmp-row-meta"></span><span class="cmp-row-est"></span></div>
                         <div class="cmp-row-bar" style="display:none"><div class="cmp-row-bar-fill"></div></div>`;
                     en.row = row;
                     listEl.appendChild(row);
@@ -686,14 +840,19 @@
                                     main.insertAdjacentHTML('beforeend', badgeFor(en));
                                 }
                                 if (p && p.ok) {
-                                    row.querySelector('.cmp-row-sub').textContent =
-                                        `${p.width}×${p.height} · ${p.fps}fps · ${p.codec || '?'}${p.hasAudio ? ' · 有音频' : ' · 无音频'}`;
+                                    const meta = row.querySelector('.cmp-row-meta');
+                                    if (meta) meta.textContent = p.via === 'video-element'
+                                        ? `约 ${p.width}×${p.height} · 时长 ${Math.round(p.durationSec)} 秒（按 30fps 估）`
+                                        : `${p.width}×${p.height} · ${p.fps}fps · ${p.codec || '?'}${p.hasAudio ? ' · 有音频' : ' · 无音频'}`;
                                 }
+                                renderEstimate(en); // 估算依赖 probe 数据, 到位后补显示
                             }
                         }).catch(() => {});
                     }
                 }
                 entries.forEach(renderRow);
+                // 弹窗打开即开始图片预压 (初始档位), est 随结果逐行补上
+                entries.forEach((en) => { if (en.kind === 'image') schedulePreview(en); });
 
                 // ---- 底部按钮 ----
                 function footerHtml() {
@@ -733,6 +892,8 @@
                 // ---- 执行 ----
                 async function runAll() {
                     phase = 'running';
+                    previewSeq++;            // 在途图片预压作废: 回调不得再触碰 UI;
+                    previewQueue.length = 0; // 已完成的结果由 compressOne 按档位决定是否复用
                     $('cmpSettings').style.display = 'none';
                     renderFooter();
                     const opts = {
