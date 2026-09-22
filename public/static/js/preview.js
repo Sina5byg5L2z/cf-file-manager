@@ -77,8 +77,9 @@ const Preview = {
             if (this.currentPath) API.downloadFile(this.currentPath);
         });
 
-        // ESC 关闭
+        // ESC 关闭 (浏览器全屏中先退出全屏, 不直接关弹窗)
         document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && document.fullscreenElement) return;
             if (e.key === 'Escape' && this.modal.style.display !== 'none') {
                 this.hide();
             }
@@ -312,7 +313,16 @@ const Preview = {
         return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
     },
 
-    async show(path, entry) {
+    // 图片扩展名兜底: 服务端 mime 缺失时也能进画廊
+    imageExtensions: new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'ico', 'svg']),
+
+    isImageEntry(e) {
+        if (!e || e.is_dir) return false;
+        if ((e.mime || '').startsWith('image/')) return true;
+        return this.imageExtensions.has((e.ext || '').toLowerCase());
+    },
+
+    async show(path, entry, siblings) {
         this.currentPath = path;
         this.currentSize = entry.size || 0;
         // Tear down any previous custom video player before rendering the next file
@@ -337,24 +347,43 @@ const Preview = {
 
         const url = API.previewUrl(path);
 
-        // Images
+        // Images — 沉浸式看图模式 (ImageViewer): 缩放/平移/旋转/画廊切换, 见 imageviewer.js。
+        // SVG 也走 <img> 渲染 (不注入 DOM, 脚本不可执行), 且矢量放大依然清晰。
         if (mime.startsWith('image/')) {
-            if (ext === 'svg') {
-                // 超大 SVG 全量注入 DOM 会卡死, 直接引导下载
-                if (this.currentSize > this.TEXT_PREVIEW_LIMIT) { this.showTooLarge(); return; }
-                // SVG 直接嵌入显示
-                try {
-                    const data = await API.preview(path);
-                    if (data.type === 'text') {
-                        this.body.innerHTML = `<div class="preview-content preview-svg">${data.content}</div>`;
-                        return;
-                    }
-                } catch (e) {}
-                // 回退到 img 标签
-                this.body.innerHTML = `<div class="preview-content preview-svg"><img src="${url}" alt="${FM.esc(entry.name)}"></div>`;
-                return;
+            // 同目录画廊: 调用方 (filemanager) 传入当前目录 entries; 由当前 path 反推目录
+            const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+            const join = (n) => dir ? dir + '/' + n : n;
+            let items = (siblings || []).filter((s) => this.isImageEntry(s)).map((s) => ({
+                path: join(s.name),
+                src: API.previewUrl(join(s.name)),
+                thumb: API.thumbnailUrl(join(s.name)),
+                name: s.name,
+                size: s.size || 0,
+                mime: s.mime || '',
+            }));
+            let index = items.findIndex((it) => it.name === entry.name);
+            if (index < 0) {
+                // 当前文件不在列表里 (搜索结果等场景) → 画廊只含当前一张
+                items = [{ path, src: url, thumb: API.thumbnailUrl(path), name: entry.name, size: entry.size || 0, mime: entry.mime || '' }];
+                index = 0;
             }
-            this.body.innerHTML = `<div class="preview-content"><img src="${url}" alt="${FM.esc(entry.name)}"></div>`;
+            this.body.innerHTML = `<div class="preview-image-host"></div>`;
+            const host = this.body.querySelector('.preview-image-host');
+            const self = this;
+            this.mediaPlayer = ImageViewer.create(host, {
+                items,
+                index,
+                onChange(item) {
+                    // 内部切换时同步弹窗元数据 (下载/新标签页跟随当前图)
+                    self.currentPath = item.path;
+                    self.currentSize = item.size || 0;
+                    self.title.textContent = item.name || '';
+                    self.info.textContent = [self.formatSize(item.size || 0), item.mime || ''].filter(Boolean).join(' · ');
+                },
+                onClose: () => this.hide(),
+                onDownload: () => this.download(),
+                onNewTab: () => { if (this.currentPath) window.open(API.previewUrl(this.currentPath), '_blank'); },
+            });
             return;
         }
 

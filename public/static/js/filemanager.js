@@ -379,7 +379,8 @@ const FM = {
     previewFile(idx) {
         const entry = this.entries[idx];
         const path = this.currentPath ? `${this.currentPath}/${entry.name}` : entry.name;
-        Preview.show(path, entry);
+        // 传入当前目录 entries: 图片预览据此构建同目录画廊 (看图模式左右切换)
+        Preview.show(path, entry, this.entries);
     },
 
     _moveSelectedPath: '',
