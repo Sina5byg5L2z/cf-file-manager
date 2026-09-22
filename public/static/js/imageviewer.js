@@ -204,7 +204,7 @@
     function ImageViewer(host, opts) {
         this.host = host;
         this.opts = opts || {};
-        this.items = (this.opts.items || []).filter(function (it) { return it && it.src; });
+        this.items = (this.opts.items || []).filter(function (it) { return it && (it.src || it.getSrc); });
         if (!this.items.length) { this.items = [{ src: '', name: '(empty)' }]; }
         this.index = Math.min(Math.max(0, this.opts.index || 0), this.items.length - 1);
         // transform state — scale is relative to natural pixel size
@@ -213,6 +213,7 @@
         this.fitScale = 1; this.nw = 0; this.nh = 0;
         this.bgModes = ['', 'iv-bg-white', 'iv-bg-checker'];
         this.bgIdx = 0;
+        this._bgManual = false;   // 用户手动选过背景(b 键/按钮)后不再按格式自动切
         this._ptrs = new Map();
         this._ls = [];           // tracked listeners for destroy()
         this._loadSeq = 0;
@@ -470,7 +471,8 @@
     };
 
     // ---- loading -----------------------------------------------------------
-    ImageViewer.prototype._load = function (idx, dir) {
+    // item.getSrc(force) → Promise<url>: 可选的异步 src 工厂 (如 SVG 先取文本再包 blob:url)
+    ImageViewer.prototype._load = function (idx, dir, force) {
         var self = this;
         this.index = idx;
         var it = this._item();
@@ -478,6 +480,7 @@
         this.rot = 0; this.flipH = false; this.flipV = false;
         this.nw = 0; this.nh = 0;
         this.scale = 1; this.tx = 0; this.ty = 0;
+        this._autoBg(it);
         this.img.classList.remove('iv-ready', 'iv-spring');
         this.root.classList.remove('iv-error-on');
         this.root.classList.add('iv-loading-on');
@@ -504,33 +507,44 @@
             self._fillInfo();
             self._fillStripThumb(idx);
         };
-        var onError = function () {
+        var onError = function (msg) {
             if (seq !== self._loadSeq) return;
             self.root.classList.remove('iv-loading-on');
             self.root.classList.add('iv-error-on');
-            self.elErrMsg.textContent = (it.name || '') + (it.size ? ' · ' + fmtBytes(it.size) : '');
+            self.elErrMsg.textContent = (msg || (it.name || '') + (it.size ? ' · ' + fmtBytes(it.size) : ''));
             self.img.classList.remove('iv-ready');
         };
-
-        // reset src to trigger a fresh load even when the URL is unchanged (retry)
-        this.img.removeAttribute('src');
-        if (it.src) {
-            this.img.src = it.src;
-            if (typeof this.img.decode === 'function') {
-                this.img.decode().then(onReady, function () {
+        var start = function (src) {
+            if (seq !== self._loadSeq) return;
+            // reset src to trigger a fresh load even when the URL is unchanged (retry)
+            self.img.removeAttribute('src');
+            if (!src) { onError(); return; }
+            self.img.src = src;
+            if (typeof self.img.decode === 'function') {
+                self.img.decode().then(onReady, function () {
                     if (seq !== self._loadSeq) return;
                     // decode() can reject for stale/cancelled loads — re-check reality
                     if (self.img.complete && self.img.naturalWidth > 0) onReady(); else onError();
                 });
             } else {
-                this.img.onload = onReady;
-                this.img.onerror = onError;
+                self.img.onload = onReady;
+                self.img.onerror = function () { if (seq === self._loadSeq) onError(); };
             }
-        } else onError();
+        };
+
+        if (it.getSrc) {
+            it.getSrc(force).then(start, function (err) {
+                if (seq !== self._loadSeq) return;
+                onError((err && err.message) ? err.message : (it.name || '加载失败'));
+            });
+        } else {
+            start(it.src);
+        }
     };
 
     ImageViewer.prototype._retry = function () {
         var it = this._item();
+        if (it.getSrc) { this._load(this.index, 0, true); return; }   // 异步工厂: 强制重取
         if (!it.src) return;
         // strip any old buster and append a fresh one (broken cached responses)
         it.src = it.src.replace(/([?&])_r=\d+/g, '');
@@ -539,7 +553,8 @@
     };
 
     ImageViewer.prototype._preload = function () {
-        // neighbours ±1; browser cache makes switching near-instant
+        // neighbours ±1; browser cache makes switching near-instant.
+        // async-src items (getSrc) are only preloaded once already resolved
         for (var d = -1; d <= 1; d += 2) {
             var it = this.items[this.index + d];
             if (it && it.src) { var im = new Image(); im.src = it.src; }
@@ -664,11 +679,25 @@
         } catch (e) { /* tainted canvas etc. — fallback stays */ }
     };
 
-    ImageViewer.prototype._cycleBg = function () {
+    // ---- background ---------------------------------------------------------
+    // SVG 常见"透明底 + 深色线条"(draw.io/mermaid 流程图导出), 默认黑舞台会黑线贴黑底不可见
+    // → SVG 项自动白底, 位图仍默认黑; 用户手动选过背景后尊重选择
+    ImageViewer.prototype._autoBg = function (it) {
+        if (this._bgManual) return;
+        var isSvg = !!(it && ((it.mime || '').indexOf('svg') >= 0 || /\.svg$/i.test(it.name || '')));
+        this._setBg(isSvg ? 1 : 0);   // 1 = iv-bg-white
+    };
+
+    ImageViewer.prototype._setBg = function (idx) {
         var cur = this.bgModes[this.bgIdx];
         if (cur) this.root.classList.remove(cur);   // mode 0 is '' (default black) — must not remove('')
-        this.bgIdx = (this.bgIdx + 1) % this.bgModes.length;
-        if (this.bgModes[this.bgIdx]) this.root.classList.add(this.bgModes[this.bgIdx]);
+        this.bgIdx = idx;
+        if (this.bgModes[idx]) this.root.classList.add(this.bgModes[idx]);
+    };
+
+    ImageViewer.prototype._cycleBg = function () {
+        this._bgManual = true;
+        this._setBg((this.bgIdx + 1) % this.bgModes.length);
     };
 
     ImageViewer.prototype._toggleFs = function () {

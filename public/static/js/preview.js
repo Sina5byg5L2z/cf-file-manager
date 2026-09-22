@@ -345,26 +345,68 @@ const Preview = {
         this.body.innerHTML = '<div class="preview-loading"><div class="spinner"></div><span>加载中...</span></div>';
         this.modal.style.display = 'flex';
 
-        const url = API.previewUrl(path);
-
         // Images — 沉浸式看图模式 (ImageViewer): 缩放/平移/旋转/画廊切换, 见 imageviewer.js。
-        // SVG 也走 <img> 渲染 (不注入 DOM, 脚本不可执行), 且矢量放大依然清晰。
+        // SVG: /api/preview 对 svg 返回 JSON 文本 (服务端把 svg 归为文本), <img> 无法直接加载;
+        // 取文本包成 blob:url (image/svg+xml, <img> 上下文脚本不执行), 顺带给只有 viewBox 的
+        // SVG 注入 width/height 内在尺寸, 否则 <img> 按 300x150 默认值算 fit。
         if (mime.startsWith('image/')) {
             // 同目录画廊: 调用方 (filemanager) 传入当前目录 entries; 由当前 path 反推目录
             const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
             const join = (n) => dir ? dir + '/' + n : n;
-            let items = (siblings || []).filter((s) => this.isImageEntry(s)).map((s) => ({
-                path: join(s.name),
-                src: API.previewUrl(join(s.name)),
-                thumb: API.thumbnailUrl(join(s.name)),
-                name: s.name,
-                size: s.size || 0,
-                mime: s.mime || '',
-            }));
+            this._revokeSvgUrls();
+            const svgUrls = this._svgBlobUrls = [];
+            const svgSrc = (p) => (force) => {
+                if (force) { const old = svgUrls.findIndex((u) => u && u.path === p); if (old >= 0) { URL.revokeObjectURL(svgUrls[old].url); svgUrls.splice(old, 1); } }
+                const hit = svgUrls.find((u) => u && u.path === p);
+                if (hit) return Promise.resolve(hit.url);
+                return API.preview(p).then((data) => {
+                    if (data.type !== 'text' || !data.content) throw new Error('SVG 内容不可用');
+                    let text = data.content;
+                    // <img> 上下文里 svg 必须有数值 width/height, 否则:
+                    //   缺省        → 布局按 300x150 默认值 (fit 计算错)
+                    //   width="100%" → 布局宽=容器宽×比例, 而 naturalWidth 只有 273x150 (Chrome 按比例
+                    //                  派生), viewer 的 fit/钳制/居中全按 natural 算 → 图像被平移出视口,
+                    //                  舞台只剩纯色 (2026-09-22 流程图.svg 白屏的根因)
+                    // 只认「数值+可选px」为安全尺寸; 其余 (100%/缺省/mm 等) 一律从 viewBox 派生注入。
+                    // 注入前先删旧 width/height 属性 — 重复属性 = 非法 XML → decode 直接失败。
+                    const tag = text.match(/<svg\b[^>]*>/i);
+                    if (tag) {
+                        const numW = /\swidth\s*=\s*["']\d+(?:\.\d+)?(?:px)?["']/i.test(tag[0]);
+                        const numH = /\sheight\s*=\s*["']\d+(?:\.\d+)?(?:px)?["']/i.test(tag[0]);
+                        if (!numW || !numH) {
+                            const vb = tag[0].match(/viewBox\s*=\s*["']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)/i);
+                            if (vb && parseFloat(vb[1]) > 0 && parseFloat(vb[2]) > 0) {
+                                text = text
+                                    .replace(/(<svg\b[^>]*?)\s+width\s*=\s*["'][^"']*["']/i, '$1')
+                                    .replace(/(<svg\b[^>]*?)\s+height\s*=\s*["'][^"']*["']/i, '$1')
+                                    .replace(/<svg\b/i, `<svg width="${vb[1]}" height="${vb[2]}"`);
+                            }
+                        }
+                    }
+                    const u = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }));
+                    svgUrls.push({ path: p, url: u });
+                    return u;
+                });
+            };
+            const isSvg = (s) => ((s.ext || s.name || '').toLowerCase().endsWith('.svg')) || (s.mime || '') === 'image/svg+xml';
+            const mkItem = (s) => {
+                const p = s.path || join(s.name);
+                const svg = isSvg(s);
+                return {
+                    path: p,
+                    src: svg ? undefined : API.previewUrl(p),
+                    getSrc: svg ? svgSrc(p) : undefined,
+                    thumb: API.thumbnailUrl(p),
+                    name: s.name,
+                    size: s.size || 0,
+                    mime: s.mime || '',
+                };
+            };
+            let items = (siblings || []).filter((s) => this.isImageEntry(s)).map(mkItem);
             let index = items.findIndex((it) => it.name === entry.name);
             if (index < 0) {
                 // 当前文件不在列表里 (搜索结果等场景) → 画廊只含当前一张
-                items = [{ path, src: url, thumb: API.thumbnailUrl(path), name: entry.name, size: entry.size || 0, mime: entry.mime || '' }];
+                items = [mkItem({ path, name: entry.name, size: entry.size || 0, mime: entry.mime || '', ext: ext })];
                 index = 0;
             }
             this.body.innerHTML = `<div class="preview-image-host"></div>`;
@@ -386,6 +428,8 @@ const Preview = {
             });
             return;
         }
+
+        const url = API.previewUrl(path);   // 仅视频/音频/iframe 分支用 (图片分支走 previewUrl/getSrc)
 
         // Video — custom player (Bilibili-style skin + gestures + resolution)
         if (mime.startsWith('video/')) {
@@ -529,6 +573,12 @@ const Preview = {
         this.body.innerHTML = `<div class="empty-state"><p>加载失败</p><br><button class="btn btn-primary" onclick="Preview.download()">下载文件</button></div>`;
     },
 
+    // 回收 SVG blob:url (看图模式为 svg 临时创建)
+    _revokeSvgUrls() {
+        (this._svgBlobUrls || []).forEach((u) => { try { URL.revokeObjectURL(u.url); } catch (e) {} });
+        this._svgBlobUrls = [];
+    },
+
     hide() {
         this.modal.style.display = 'none';
         this.currentPath = null;
@@ -538,5 +588,6 @@ const Preview = {
         this.body.querySelectorAll('video,audio').forEach(el => el.pause());
         this.body.innerHTML = '';
         this._htmlContent = null;
+        this._revokeSvgUrls();
     }
 };
