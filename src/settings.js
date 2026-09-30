@@ -30,12 +30,16 @@ const DEFAULTS = {
   // 不随公开的 /api/settings 下发(见 publicOf), 登录态才单独补发。
   // ai_* 是「AI 翻译」用的 OpenAI 兼容接口配置。密钥 ai_key 存配置表（用户在设置里自己填，
   // 任何厂商均可）；留空时回落 env.SILLICONFLOW_API_KEY（部署期兜底）。公开视图会抹掉 ai_key。
+  // ai_mode 决定调用方: server = Worker 出网直连（默认，现状）；local = 浏览器直连本地
+  // OpenAI 兼容服务（Ollama / LM Studio 等），Worker 只做拆装与落库、不发起模型请求，
+  // 因此本地模型无需内网穿透。base 为 localhost 时只有 local 模式有意义。
   lyrics: {
     enabled: true,
     provider: 'auto',
     trans_provider: 'off',
     netease_base: '',
     ai_enabled: false,
+    ai_mode: 'server',
     ai_model: 'Qwen/Qwen3-8B',
     ai_base: 'https://api.siliconflow.cn/v1',
     ai_key: '',
@@ -70,6 +74,7 @@ const CMP_QUALITY = ['high', 'medium', 'low'];
 const AI_MODEL_DEFAULT = 'Qwen/Qwen3-8B';
 const AI_BASE_DEFAULT = 'https://api.siliconflow.cn/v1';
 const AI_MODEL_MAX = 120;
+const AI_MODES = ['server', 'local'];
 
 function clampInt(v, min, max, fallback) {
   const n = parseInt(v, 10);
@@ -148,6 +153,7 @@ function normalize(input, maxUpload) {
     trans_provider: LYRICS_TRANS.includes(lyr.trans_provider) ? lyr.trans_provider : DEFAULTS.lyrics.trans_provider,
     netease_base: normBase(lyr.netease_base),
     ai_enabled: lyr.ai_enabled === true,
+    ai_mode: AI_MODES.includes(lyr.ai_mode) ? lyr.ai_mode : DEFAULTS.lyrics.ai_mode,
     ai_model: normAiModel(lyr.ai_model),
     ai_base: normAiBase(lyr.ai_base),
     ai_key: String(lyr.ai_key || '').trim().slice(0, 300),
@@ -232,6 +238,7 @@ export async function lyricsAiOf(env, db) {
   const lyr = await lyricsConfigOf(env, db);
   return {
     enabled: lyr.ai_enabled === true,
+    mode: lyr.ai_mode === 'local' ? 'local' : 'server',
     model: lyr.ai_model || AI_MODEL_DEFAULT,
     base: lyr.ai_base || AI_BASE_DEFAULT,
     key: lyr.ai_key || '',

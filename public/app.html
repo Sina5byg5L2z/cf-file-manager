@@ -404,12 +404,22 @@
                         </label>
                     </div>
                 </div>
-                <div class="settings-hint" style="margin-top:-4px">
-                    <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                        <input type="checkbox" id="setAiEnabled" style="width:auto"> 启用「AI 翻译」按钮
-                    </label>
+                <div class="form-row2">
+                    <div class="form-group">
+                        <label>调用方式</label>
+                        <select id="setAiMode">
+                            <option value="server">服务端调用（Worker 出网访问接口）</option>
+                            <option value="local">本地模型（浏览器直连，免内网穿透）</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>&nbsp;</label>
+                        <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;padding-top:6px">
+                            <input type="checkbox" id="setAiEnabled" style="width:auto"> 启用「AI 翻译」按钮
+                        </label>
+                    </div>
                 </div>
-                <div class="settings-hint">任何 OpenAI 兼容接口均可，改地址 / 模型名 / 密钥后保存即生效，无需重新部署。常用厂商（接口地址 → 模型名示例）：<br>· 硅基流动 <code>https://api.siliconflow.cn/v1</code> → Qwen/Qwen3-8B（有免费额度）<br>· 智谱 GLM <code>https://open.bigmodel.cn/api/paas/v4</code> → glm-4.7-flash（免费）/ glm-5.1<br>· DeepSeek <code>https://api.deepseek.com</code> → deepseek-v4-flash / deepseek-v4-pro<br>· Kimi <code>https://api.moonshot.cn/v1</code> → kimi-k2 系列；· 阿里百炼 <code>https://dashscope.aliyuncs.com/compatible-mode/v1</code> → qwen 系列；· OpenRouter <code>https://openrouter.ai/api/v1</code>（一个 Key 通多家模型）。<br>密钥保存在服务端配置中，不下发给未登录访客；留空则回落服务端环境变量 <code>SILLICONFLOW_API_KEY</code>。翻译按每次约 40 行分批请求，失败会自动拆分重试。</div>
+                <div class="settings-hint">任何 OpenAI 兼容接口均可，改地址 / 模型名 / 密钥后保存即生效，无需重新部署。<br><b>服务端调用</b>（默认）：Worker 直接访问云厂商接口。常用厂商（接口地址 → 模型名示例）：<br>· 硅基流动 <code>https://api.siliconflow.cn/v1</code> → Qwen/Qwen3-8B（有免费额度）<br>· 智谱 GLM <code>https://open.bigmodel.cn/api/paas/v4</code> → glm-4.7-flash（免费）/ glm-5.1<br>· DeepSeek <code>https://api.deepseek.com</code> → deepseek-v4-flash / deepseek-v4-pro<br>· Kimi <code>https://api.moonshot.cn/v1</code> → kimi-k2 系列；· 阿里百炼 <code>https://dashscope.aliyuncs.com/compatible-mode/v1</code> → qwen 系列；· OpenRouter <code>https://openrouter.ai/api/v1</code>（一个 Key 通多家模型）。<br><b>本地模型</b>：地址填本机 OpenAI 兼容服务，如 Ollama <code>http://localhost:11434/v1</code>（模型名如 qwen3:8b）、LM Studio <code>http://localhost:1234/v1</code>、llama.cpp server <code>http://localhost:8080/v1</code>。浏览器从当前页面直接调用，<b>不需要内网穿透</b>；但本地服务必须允许跨域 —— Ollama 设置环境变量 <code>OLLAMA_ORIGINS=*</code> 后重启，LM Studio 在开发者设置里打开 Enable CORS。注意：手机浏览器里 localhost 指手机自身，跨设备需改填局域网地址，且 https 页面会被浏览器拦截非本机的 http 地址。密钥可选（本地服务通常留空；部分网关需要时再填），保存在服务端配置中，不下发给未登录访客；服务端调用留空则回落环境变量 <code>SILLICONFLOW_API_KEY</code>。翻译按每次约 20 行分批请求，失败会自动拆分重试。</div>
                 <div class="settings-group">上传前压缩</div>
                 <div class="form-row2">
                     <div class="form-group">
@@ -468,21 +478,22 @@
     <script src="/static/vendor/marked@15.0.12.min.js"></script>
     <script src="/static/vendor/purify@3.4.15.min.js"></script>
     <script src="/static/js/dialog.js?v=20260917a"></script>
-    <script src="/static/js/api.js?v=20260920b"></script>
-    <script src="/static/js/settings.js?v=20260920a"></script>
+    <script src="/static/js/api.js?v=20260930a"></script>
+    <script src="/static/js/settings.js?v=20260925a"></script>
     <script src="/static/js/storage.js?v=20260918f"></script>
     <script src="/static/js/player.js?v=20260913b"></script>
     <script src="/static/js/imageviewer.js?v=20260922c"></script>
     <script src="/static/js/lyrics.js?v=20260917d"></script>
+    <script src="/static/js/aitranslate.js?v=20260925a"></script>
     <script src="/static/js/trackmeta.js?v=20260918e"></script>
-    <script src="/static/js/musicplayer.js?v=20260918b"></script>
+    <script src="/static/js/musicplayer.js?v=20260925a"></script>
     <script src="/static/js/fileicons.js?v=b200724b"></script>
     <script src="/static/js/filemanager.js?v=20260922a"></script>
     <script src="/static/js/compress.js?v=20260920d"></script>
-    <script src="/static/js/upload.js?v=20260920c"></script>
+    <script src="/static/js/upload.js?v=20260930a"></script>
     <script src="/static/js/preview.js?v=20260922c"></script>
     <script src="/static/js/share.js"></script>
-    <script src="/static/js/imagehost.js?v=20260920a"></script>
+    <script src="/static/js/imagehost.js?v=20260930a"></script>
     <script src="/static/js/app.js?v=20260920b"></script>
     <script src="/static/js/theme.js"></script>
 </body>

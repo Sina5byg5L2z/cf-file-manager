@@ -33,12 +33,16 @@ export default {
   async scheduled(event, env, ctx) {
     const cutoff = Date.now() - 24 * 3600 * 1000;
     const stale = await env.DB.prepare(
-      'SELECT id, db_id FROM upload_sessions WHERE (updated_at > 0 AND updated_at < ?1) OR (updated_at = 0 AND created_at < ?1)',
+      'SELECT id, db_id, content_id, merged_upto FROM upload_sessions WHERE (updated_at > 0 AND updated_at < ?1) OR (updated_at = 0 AND created_at < ?1)',
     ).bind(cutoff).all();
     for (const row of stale.results || []) {
       // 暂存分片在会话钉住的库里, 会话行在主库 —— 分两处删
       const vdb = storageApi.dbById(env, row.db_id || 1) || env.DB;
       await vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind('u:' + row.id).run();
+      // 已合并进内容键的字节也是会话产物 (对用户不可见), 一并清掉
+      if (row.content_id && (row.merged_upto || 0) > 0) {
+        await vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind('c:' + row.content_id).run();
+      }
       await env.DB.prepare('DELETE FROM upload_sessions WHERE id = ?1').bind(row.id).run();
     }
     // 跨库改名/删除失败留下的待办: 重试到收敛 (孤儿字节与回滚失败的半改名都在这里消化)
@@ -142,6 +146,8 @@ async function route(request, env, ctx) {
   if (path === '/api/files/upload/chunk' && method === 'POST') return vfs.uploadChunk(request, env, db);
   if (path === '/api/files/upload/complete' && method === 'POST') return vfs.uploadComplete(request, env, db);
   if (path === '/api/files/upload/abort' && method === 'POST') return vfs.uploadAbort(request, env, db);
+  // 秒传探测: 前端算好全文件 SHA-256 后先打这里, 命中则零字节传输直接建引用
+  if (path === '/api/upload/dedup' && method === 'POST') return vfs.dedupCheck(request, env, db);
 
   // 预览 / 搜索 / 缩略图
   if (path === '/api/preview' && method === 'GET') return vfs.previewFile(request, env, db, url);

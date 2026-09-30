@@ -461,6 +461,70 @@
         } catch (e) { return false; }
     }
 
+    // 翻译成功后的公共收尾（服务端直连 / 本地直连两条路径共用）:
+    // 译文写进了 track_meta.trans(等价于手填译文) → 本地也要同步,
+    // 否则下次重进这首歌时, 内存里的 c.trans 还是旧的, 覆盖层又失效了。
+    function applyTranslateResult(c, origText, r) {
+        state.aiBusy = false;
+        if (!r || !r.trans) {
+            syncTools();
+            Dialog.alert('翻译失败：返回结果为空');
+            return;
+        }
+        c.trans = r.trans;
+        // 本地歌词缓存也要更新, 否则切歌回来命中的是"没有译文"的旧缓存
+        var TM = global.TrackMeta;
+        if (TM && TM.cache && TM.cache.put && state.lines.length) {
+            TM.cache.put(lyricKey(), {
+                synced: origText, trans: r.trans, roma: null,
+                source: state.source || 'online', ts: Date.now(),
+            });
+        }
+        applyLyric(origText, r.trans, null, state.source || 'online');
+        var note = r.note ? '\n' + r.note : '';
+        Dialog.alert('翻译完成，已保存为这首歌的译文（' + (r.calls || 1) + ' 次请求）' + note);
+    }
+
+    // 本地模型直连（设置 ai_mode=local）: Worker 够不着用户的 localhost,
+    // 模型请求由浏览器发起。两段式协议:
+    //   1. op=split  拿服务端拆好的待翻文本 + 全部调用参数（提示词/模型/地址/密钥/批次）;
+    //   2. AITranslate 直连本地接口分批翻译（失败自动劈半重试）;
+    //   3. op=finish 译文交回服务端, 拼回时间戳并落库, 之后与直连路径同收尾。
+    function aiTranslateLocal(c, text) {
+        state.aiBusy = true;
+        syncTools();
+        var dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+        global.API.lyricsTlSplit(c.path, {
+            lrc: text, title: c.title || '', artist: c.artist || '', duration: dur,
+        }).then(function (plan) {
+            if (state.current !== c) return null;            // 已切歌则丢弃
+            if (!global.AITranslate || !global.AITranslate.translateLines) {
+                throw new Error('本地翻译组件（aitranslate.js）未加载');
+            }
+            if (!plan || !plan.ok || !plan.texts || !plan.texts.length) {
+                throw new Error('服务端未返回待翻文本');
+            }
+            return global.AITranslate.translateLines(plan, plan.texts).then(function (out) {
+                if (state.current !== c) return null;
+                return global.API.lyricsTlFinish(c.path, {
+                    lrc: plan.lrc,
+                    translations: out.lines,
+                    calls: out.calls,
+                    failed: out.failed,
+                    lastErr: out.lastErr || '',
+                });
+            });
+        }).then(function (r) {
+            if (!r || state.current !== c) return;
+            applyTranslateResult(c, text, r);
+        }).catch(function (e) {
+            if (state.current !== c) return;
+            state.aiBusy = false;
+            syncTools();
+            Dialog.alert('翻译失败：' + ((e && e.message) || '未知错误'));
+        });
+    }
+
     function aiTranslate() {
         var c = state.current;
         if (!c || state.aiBusy) return;
@@ -474,6 +538,21 @@
             Dialog.alert('这首歌还没有带时间轴的原文歌词，无法翻译');
             return;
         }
+        // 调用方式由设置决定: local = 浏览器直连本地模型（无需内网穿透）
+        var mode = 'server';
+        try {
+            if (global.AppSettings && global.AppSettings.lyrics) {
+                mode = global.AppSettings.lyrics().ai_mode || 'server';
+            }
+        } catch (e) { /* 设置未就绪时按服务端直连 */ }
+        if (mode === 'local') {
+            if (!global.API.lyricsTlSplit || !global.API.lyricsTlFinish) {
+                Dialog.alert('当前页面不支持本地模型翻译（api.js 版本过旧，请刷新页面）');
+                return;
+            }
+            aiTranslateLocal(c, text);
+            return;
+        }
         state.aiBusy = true;
         syncTools();
         var dur = Number.isFinite(audio.duration) ? audio.duration : 0;
@@ -481,26 +560,7 @@
             lrc: text, title: c.title || '', artist: c.artist || '', duration: dur,
         }).then(function (r) {
             if (state.current !== c) return;                 // 已切歌则丢弃
-            state.aiBusy = false;
-            if (!r || !r.trans) {
-                syncTools();
-                Dialog.alert('翻译失败：返回结果为空');
-                return;
-            }
-            // 译文写进了 track_meta.trans(等价于手填译文) → 本地也要同步,
-            // 否则下次重进这首歌时, 内存里的 c.trans 还是旧的, 覆盖层又失效了。
-            c.trans = r.trans;
-            // 本地歌词缓存也要更新, 否则切歌回来命中的是"没有译文"的旧缓存
-            var TM = global.TrackMeta;
-            if (TM && TM.cache && TM.cache.put && state.lines.length) {
-                TM.cache.put(lyricKey(), {
-                    synced: text, trans: r.trans, roma: null,
-                    source: state.source || 'online', ts: Date.now(),
-                });
-            }
-            applyLyric(text, r.trans, null, state.source || 'online');
-            var note = r.note ? '\n' + r.note : '';
-            Dialog.alert('翻译完成，已保存为这首歌的译文（' + (r.calls || 1) + ' 次请求）' + note);
+            applyTranslateResult(c, text, r);
         }).catch(function (e) {
             if (state.current !== c) return;
             state.aiBusy = false;

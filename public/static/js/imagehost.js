@@ -419,6 +419,7 @@ const ImageHost = (function() {
                     id: t.id, name: t.name, size: t.size, lastModified: t.lastModified,
                     uploadId: t.uploadId, totalChunks: t.totalChunks, sentChunks: t.sentChunks,
                     chunkSize: t.chunkSize, concurrent: t.concurrent, fileKey: t.fileKey,
+                    fullHash: t.fullHash || null,   // 已算过的全文件 SHA-256 不重算
                     // 压缩产物: OPFS 缓存名 + mime (恢复时按 lastModified 重建 File 保指纹)
                     cacheName: t.compressCache || null,
                     cType: t.cType || (t.file ? (t.file.type || '') : ''),
@@ -469,6 +470,7 @@ const ImageHost = (function() {
                     totalChunks: s.totalChunks, sentChunks: s.sentChunks,
                     chunkSize: s.chunkSize || IH_CHUNK_SIZE, concurrent: s.concurrent || IH_CONCURRENT,
                     timeoutRetries: 0, fileKey: s.fileKey || '', needsFile: true,
+                    fullHash: s.fullHash || null,
                     failed: !!s.failed, done: false, batchSize: 0,
                     received: null, inflight: null, hashes: {}, result: null,
                     compressCache: s.cacheName || null, cType: s.cType || '',
@@ -641,6 +643,35 @@ const ImageHost = (function() {
                 if (!task.inflight) task.inflight = new Set();
                 if (!task.hashes) task.hashes = {};
 
+                // Step 0: 秒传探测 (全新任务才做)。全文件 SHA-256 复用 Upload 的纯 JS
+                // 增量实现 (4MB 块, 内存恒定), 算过的随任务缓存不重算。
+                // 命中 → 服务端直接建图床条目, 零字节传输。探测异常绝不阻塞普通上传。
+                if (!task.uploadId && task.file && !task.fullHash) {
+                    status.textContent = '校验内容 0%';
+                    task.fullHash = await Upload.hashFileWhole(task.file, (p) => {
+                        status.textContent = `校验内容 ${Math.round(p * 100)}%`;
+                    });
+                }
+                if (!task.uploadId && task.fullHash) {
+                    const probe = await API.dedupCheck({
+                        hash: task.fullHash, size: totalSize, kind: 'image', name: task.name,
+                    }).catch(() => null);
+                    if (probe && probe.dedup) {
+                        status.textContent = '✓ 秒传';
+                        status.style.color = 'var(--color-success)';
+                        btn.style.display = 'none';
+                        task.done = true;
+                        task.progress = 100;
+                        task.result = probe;
+                        this.dropDoneTask(task);
+                        this.saveState();
+                        this.refreshHeader();
+                        this.loadPage(currentPage);
+                        if (task.batchSize === 1 && task.result) this.showEmbedDialog(task.result);
+                        return;
+                    }
+                }
+
                 // Step 1: Init (带 file_key; 服务端命中未完成会话则返回已传分片)
                 // 两种情况都必须走一次:
                 //   - 没有 uploadId: 全新任务
@@ -652,6 +683,7 @@ const ImageHost = (function() {
                     if (!task.fileKey && task.file) task.fileKey = await Upload.fileKey(task.file, task.chunkSize);
                     const initRes = await API.ihUploadInit(task.name, task.totalChunks, {
                         fileSize: totalSize, chunkSize: task.chunkSize, fileKey: task.fileKey,
+                        fileHash: task.fullHash,
                     });
                     const oldUploadId = task.uploadId;
                     task.uploadId = initRes.upload_id;

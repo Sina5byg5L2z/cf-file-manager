@@ -91,11 +91,11 @@ export async function journalRetry(mainDb, env, limit = 200) {
 }
 
 // ---------------- 元数据查询 (主库) ----------------
-// 收集一条路径(含整棵子树)下所有文件行: [{path, db_id, size}]
-// size 用于调用方按归属库做用量记帐
+// 收集一条路径(含整棵子树)下所有文件行: [{path, db_id, size, content_id}]
+// size 用于调用方按归属库做用量记帐; content_id 用于秒传内容的引用计数
 export async function collectFileRows(mainDb, cleanPath) {
   const r = await mainDb.prepare(
-    `SELECT path, db_id, size FROM fs_nodes WHERE (${subtreeMatch('path')}) AND is_dir = 0`,
+    `SELECT path, db_id, size, content_id FROM fs_nodes WHERE (${subtreeMatch('path')}) AND is_dir = 0`,
   ).bind(cleanPath).all();
   return r.results || [];
 }
@@ -199,7 +199,9 @@ export async function rewriteBlobKeys(mainDb, env, fileRows, fromPath, toPath) {
 // ---------------- 复制 ----------------
 // pairs: [{ src, dst, db_id }] —— 复制的目标是新文件, 刻意留在**源文件所在的库**,
 // 这样 INSERT..SELECT 是同库搬运 (字节不过 Worker 内存, 零成本)。
-export async function copyBlobKeys(mainDb, env, pairs) {
+// mode: 'both' (默认, f: + t: 全拷, 历史行用) | 'thumb' (只拷 t:, 内容寻址行
+// 字节按 content_id 引用不复制, 只有按路径存的缩略图需要跟着新路径走一份)。
+export async function copyBlobKeys(mainDb, env, pairs, mode = 'both') {
   if (!pairs || !pairs.length) return;
   const byDb = new Map();
   for (const p of pairs) {
@@ -207,16 +209,16 @@ export async function copyBlobKeys(mainDb, env, pairs) {
     if (!byDb.has(id)) byDb.set(id, []);
     byDb.get(id).push(p);
   }
+  const prefixes = mode === 'thumb' ? ['t:'] : ['f:', 't:'];
   const done = [];
   try {
     for (const [dbId, items] of byDb) {
       const vdb = dbById(env, dbId) || mainDb;
       for (let i = 0; i < items.length; i += 20) {
         const slice = items.slice(i, i + 20);
-        const stmts = slice.flatMap((it) => [
-          vdb.prepare('INSERT INTO blobs (key, idx, data) SELECT ?2, idx, data FROM blobs WHERE key = ?1').bind('f:' + it.src, 'f:' + it.dst),
-          vdb.prepare('INSERT INTO blobs (key, idx, data) SELECT ?2, idx, data FROM blobs WHERE key = ?1').bind('t:' + it.src, 't:' + it.dst),
-        ]);
+        const stmts = slice.flatMap((it) => prefixes.map((pfx) =>
+          vdb.prepare('INSERT INTO blobs (key, idx, data) SELECT ?2, idx, data FROM blobs WHERE key = ?1').bind(pfx + it.src, pfx + it.dst),
+        ));
         await vdb.batch(stmts);
       }
       done.push({ dbId, vdb, dsts: items.map((it) => it.dst) });
@@ -225,7 +227,7 @@ export async function copyBlobKeys(mainDb, env, pairs) {
     // 补偿: 复制出来的目标 key 全是新建的, 删掉不会伤及原有数据。
     // 不做补偿的话, 失败会留下没有元数据引用的孤儿字节 —— 而空间正是这里的稀缺资源。
     for (const d of done) {
-      const keys = d.dsts.flatMap((x) => ['f:' + x, 't:' + x]);
+      const keys = d.dsts.flatMap((x) => prefixes.map((pfx) => pfx + x));
       for (let i = 0; i < keys.length; i += 40) {
         const slice = keys.slice(i, i + 40);
         try {

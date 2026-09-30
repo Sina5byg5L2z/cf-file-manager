@@ -9,6 +9,7 @@ import {
   mimeFromName, isImageName,
 } from './util.js';
 import { getNode, serveFileContent, collectZipEntries, zipStreamResponse } from './vfs.js';
+import { blobKeyOf } from './dedup.js';
 import { shareLyrics, shareCover } from './lyrics.js';
 import { cookieValue, cookieHeader, isSecureReq, signPayload, verifyPayload } from './auth.js';
 
@@ -245,7 +246,7 @@ export async function accessShare(req, env, db, id, url) {
     }
     if (!isImageName(target.name)) return jerr('缩略图不可用', 404);
     return serveFileContent(req, env, db, {
-      key: 'f:' + target.path, size: target.size, mime: target.mime || mimeFromName(target.name),
+      key: blobKeyOf(target), size: target.size, mime: target.mime || mimeFromName(target.name),
       filename: target.name, inline: true, cacheTtl: 86400, cacheKeyPrefix: 'pub', nchunks: target.nchunks,
       db_id: target.db_id || 1,
     });
@@ -304,7 +305,7 @@ export async function accessShare(req, env, db, id, url) {
 
 async function serveShareNode(req, env, db, node, inline) {
   return serveFileContent(req, env, db, {
-    key: 'f:' + node.path, size: node.size, mime: node.mime || mimeFromName(node.name),
+    key: blobKeyOf(node), size: node.size, mime: node.mime || mimeFromName(node.name),
     filename: node.name, inline, cacheTtl: 300, cacheKeyPrefix: 'share', nchunks: node.nchunks,
     db_id: node.db_id || 1,
   });

@@ -7,6 +7,13 @@
 //   3. few-shot 里用"行数必须相等""不要合并/拆分/增删行"把自由度压到最低；
 //   4. 返回后严格校验行数，不等则对半劈开重试（劈到 1 行还失败就放弃那一段）。
 // 时间戳由服务端按索引原位拼回，模型碰不到，也就不可能改坏时间轴。
+//
+// 本地模型支持（ai_mode=local）：Worker 够不着用户的 localhost，模型请求改由
+// 浏览器发起（同机访问 localhost 不需要内网穿透）。协议为两段式 ——
+//   op=split   服务端拆时间戳/剔元信息行，下发待翻文本 + 全部调用参数（单一事实源）；
+//   op=finish  浏览器翻完交回译文数组，服务端按索引拼回时间戳并落库。
+// 浏览器侧的分批/JSON 容错/劈半重试在 public/static/js/aitranslate.js，
+// 算法与本文件的 translateLines 保持一致（改一边记得改另一边）。
 
 import { json, jerr, sanitizeRel } from './util.js';
 import { lyricsAiOf } from './settings.js';
@@ -187,7 +194,10 @@ const META_RE = /^\s*\[(ar|ti|al|by|offset|re|ve|length|au|encoding|tool|kana):[
 const MAX_LRC_CHARS = 300 * 1024;
 
 function hasTimestamp(text) {
-  return TS_RE.test(String(text || ''));
+  // 只判"是否存在时间戳", 不锚定字符串起点 —— LRC 常以 [ar:]/[ti:] 元信息行开头,
+  // 锚定起点会把带完整时间轴的歌词误判成"没有时间轴"（splitLrc 的逐行 TS_RE 不受影响,
+  // 那里的锚定是正确的: 每行独立判断）
+  return /\[\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?\]/.test(String(text || ''));
 }
 
 // 元信息行 [ar:...] 无正文, 不翻译也不参与行数校验
@@ -216,49 +226,60 @@ export function splitLrc(lrc) {
   });
 }
 
-export async function translateLrc(env, cfg, lrc) {
-  const rows = splitLrc(lrc);
-  // 只把"需要翻译的行"送出去，其余（元信息/空行）原地保留
+// 送翻行号: 跳过元信息行(keep=true)与空正文行
+function collectIdx(rows) {
   const idx = [];
   for (let i = 0; i < rows.length; i++) {
     if (!rows[i].keep && rows[i].text.trim()) idx.push(i);
   }
-  if (!idx.length) {
-    return { trans: '', calls: 0, failed: 0, note: '歌词没有可翻译的正文' };
-  }
+  return idx;
+}
 
-  const texts = idx.map(i => rows[i].text);
-  const { lines: got, failed, calls, lastErr } = await translateLines(env, cfg, texts);
-
-  // 译文按"送翻时的顺序"回填到原始行号上；没翻出来的行保留原文
-  // （宁可留原文也不要留空 —— 空行会让前端双语显示错位）
+// 译文按"送翻时的顺序"回填到原始行号上；没翻出来的行保留原文
+// （宁可留原文也不要留空 —— 空行会让前端双语显示错位）
+function mergeLrc(rows, idx, got) {
   const byRow = new Map();
   idx.forEach((rowIdx, k) => {
     const t = got[k];
     if (t != null && t !== '') byRow.set(rowIdx, t);
   });
 
-  const merged = rows.map((r, i) => {
+  return rows.map((r, i) => {
     if (r.keep) return r.text;
     const t = byRow.get(i);
     if (t == null) return r.ts + r.text;
     return r.ts + t;
   });
+}
 
-  // 失败时带上最后一次的错误信息（多半是上游限流/抖动），劈半重试已自愈，给用户一个解释
-  let note = '';
+// 失败时带上最后一次的错误信息（多半是上游限流/抖动），劈半重试已自愈，给用户一个解释
+function buildNote(failed, lastErr) {
   if (failed) {
-    note = `有 ${failed} 行未能翻译，已保留原文` + (lastErr ? `（最后错误：${lastErr}）` : '');
+    return `有 ${failed} 行未能翻译，已保留原文` + (lastErr ? `（最后错误：${lastErr}）` : '');
   }
-  if (lastErr && !failed) {
-    note = `中途出错但已自动重试成功（${lastErr}）`;
+  if (lastErr) {
+    return `中途出错但已自动重试成功（${lastErr}）`;
   }
+  return '';
+}
+
+export async function translateLrc(env, cfg, lrc) {
+  const rows = splitLrc(lrc);
+  // 只把"需要翻译的行"送出去，其余（元信息/空行）原地保留
+  const idx = collectIdx(rows);
+  if (!idx.length) {
+    return { trans: '', calls: 0, failed: 0, note: '歌词没有可翻译的正文' };
+  }
+
+  const texts = idx.map(i => rows[i].text);
+  const { lines: got, failed, calls, lastErr } = await translateLines(env, cfg, texts);
+  const merged = mergeLrc(rows, idx, got);
 
   return {
     trans: merged.join('\n'),
     calls,
     failed,
-    note,
+    note: buildNote(failed, lastErr),
   };
 }
 
@@ -269,10 +290,117 @@ export function lrcForCopy(lrc) {
 }
 
 // ---------------- 路由 ----------------
-// POST /api/lyrics/translate  { path, title?, artist?, duration?, lrc? }
-//   lrc 传入 → 翻传入的（前端刚拿到的即时代理歌词，避免再走一次上游）
-//   不传     → 自己 resolveLyrics 取原文
+// POST /api/lyrics/translate  { path, op?, lrc?, title?, artist?, duration?, translations?, calls?, failed?, last_err? }
+//   无 op（默认）→ 服务端直连调用模型（mode=server，现状行为）
+//   op='split'   → 本地模型第一步：下发待翻文本与调用参数，由浏览器直连本地接口
+//   op='finish'  → 本地模型第二步：译文交回，服务端拼回时间戳并落库
 // 成功 → 写回 track_meta.trans（等价于"手填译文"，走现有的覆盖层语义）+ 返回译文
+
+// 拿原文：优先用前端传的（它刚刚渲染的就是这份），否则自己解析一遍。
+// resolveLyrics 失败时抛错，由调用方决定返回什么（服务端路径/本地 split 文案一致）。
+async function resolveSource(path, body, env, db) {
+  let lrc = optLrcText(body && body.lrc);
+  let title = String((body && body.title) || '').trim();
+  let artist = String((body && body.artist) || '').trim();
+  if (!lrc) {
+    const r = await resolveLyrics(env, db, {
+      path,
+      title: title || undefined,
+      artist: artist || undefined,
+      duration: Number(body && body.duration) || 0,
+    });
+    if (r && r.found && r.synced) {
+      lrc = r.synced;
+      if (!title) title = r.title || '';
+      if (!artist) artist = r.artist || '';
+    }
+  }
+  return { lrc, title, artist };
+}
+
+// 译文落库: 写进 track_meta.trans，语义与"用户手填译文"完全一致（覆盖层，
+// 不改动 lrc，也不影响原文来源）。用 upsert 避免碰到用户已填的 lrc/title 等字段。
+async function storeTrans(db, path, trans) {
+  try {
+    await db.prepare(
+      `INSERT INTO track_meta (path, trans, updated_at) VALUES (?1, ?2, ?3)
+       ON CONFLICT(path) DO UPDATE SET trans = excluded.trans, updated_at = excluded.updated_at`,
+    ).bind(path, trans, Date.now()).run();
+  } catch (e) {
+    if (!/no such table/i.test(String(e && e.message))) {
+      // 落库失败不该让用户白等一次翻译，译文照常返回，只是下次要重翻
+      console.error('translate store failed:', e && e.message);
+    }
+  }
+}
+
+// 本地模型第一步：服务端拆时间戳/剔元信息行，把待翻文本与全部调用参数下发给浏览器。
+// 拆装/提示词/参数全部以服务端为单一事实源，前端（aitranslate.js）不重复维护。
+async function localSplit(path, body, env, db, ai) {
+  let lrc, title, artist;
+  try {
+    ({ lrc, title, artist } = await resolveSource(path, body, env, db));
+  } catch (e) {
+    return jerr('获取原歌词失败：' + (e && e.message || e), 500);
+  }
+  if (!lrc) return jerr('这首歌还没有原歌词，无法翻译', 400);
+  if (!hasTimestamp(lrc)) return jerr('原文没有时间轴，暂不支持翻译（请先取到带时间戳的歌词）', 400);
+
+  const rows = splitLrc(lrc);
+  const idx = collectIdx(rows);
+  if (!idx.length) return jerr('歌词没有可翻译的正文', 400);
+  const texts = idx.map(i => {
+    const t = rows[i].text;
+    return t.length > MAX_LINE_CHARS ? t.slice(0, MAX_LINE_CHARS) : t;
+  });
+
+  return json({
+    ok: true,
+    local: true,
+    lrc,          // 原样交回 finish：splitLrc 是确定性的，服务端按同一份输入拼回，两次调用间无状态
+    texts,
+    title, artist,
+    base: ai.base,
+    model: ai.model,
+    // 只回传用户自己在设置里填的密钥（部分本地网关也需要鉴权），绝不回落 env 的云厂商密钥；
+    // 本接口在 JWT 之后，密钥下发范围与 GET /api/settings 登录态补发一致
+    key: ai.key || '',
+    prompt: SYSTEM_PROMPT,
+    batch: MAX_LINES_PER_BATCH,
+    temperature: TEMPERATURE,
+    max_tokens: MAX_TOKENS,
+    thinking_off: thinkingOff(ai),
+  });
+}
+
+// 本地模型第二步：浏览器翻完把译文数组交回（与 split 的 texts 一一对应；
+// 失败行传空串/null → mergeLrc 保留原文），服务端拼回时间戳并落库。
+async function localFinish(path, body, db) {
+  const lrc = optLrcText(body && body.lrc);
+  if (!lrc) return jerr('缺少原文歌词（lrc），请重新发起翻译', 400);
+  const arr = body && body.translations;
+  if (!Array.isArray(arr)) return jerr('译文格式错误（应为数组）', 400);
+
+  const rows = splitLrc(lrc);
+  const idx = collectIdx(rows);
+  if (!idx.length) return jerr('歌词没有可翻译的正文', 400);
+  if (arr.length !== idx.length) {
+    return jerr(`译文行数不匹配：期望 ${idx.length}，实际 ${arr.length}`, 400);
+  }
+
+  const got = arr.map(v => (v == null ? '' : String(v)));
+  const merged = mergeLrc(rows, idx, got);
+  const trans = merged.join('\n');
+
+  const failed = parseInt(body && body.failed, 10) || 0;
+  const lastErr = String((body && body.last_err) || '').slice(0, 200);
+  const calls = parseInt(body && body.calls, 10) || 0;
+
+  await storeTrans(db, path, trans);
+  // 手填译文不写 D1 lyrics / 边缘缓存（那是联网结果的缓存），前端拿返回值直接重渲染即可。
+  return json({ ok: true, trans, calls, note: buildNote(failed, lastErr) });
+}
+
 export async function translateLyrics(req, env, db) {
   let body;
   try { body = await req.json(); } catch { return jerr('请求格式错误'); }
@@ -281,28 +409,20 @@ export async function translateLyrics(req, env, db) {
 
   const ai = await lyricsAiOf(env, db);
   if (!ai.enabled) return jerr('AI 翻译未开启，请先到「参数设置 → 歌词」打开', 400);
+
+  const op = body && body.op;
+  if (op === 'split') return localSplit(path, body, env, db, ai);
+  if (op === 'finish') return localFinish(path, body, db);
+
+  // ---- 服务端直连路径（mode=server 或旧前端缓存）----
   if (!ai.hasKey) return jerr('未配置翻译接口密钥（请在设置 → AI 翻译中填写）', 400);
 
-  // 1) 拿原文：优先用前端传的（它刚刚渲染的就是这份），否则自己解析一遍
-  let lrc = optLrcText(body && body.lrc);
-  let title = String((body && body.title) || '').trim();
-  let artist = String((body && body.artist) || '').trim();
-  if (!lrc) {
-    try {
-      const r = await resolveLyrics(env, db, {
-        path,
-        title: title || undefined,
-        artist: artist || undefined,
-        duration: Number(body && body.duration) || 0,
-      });
-      if (r && r.found && r.synced) {
-        lrc = r.synced;
-        if (!title) title = r.title || '';
-        if (!artist) artist = r.artist || '';
-      }
-    } catch (e) {
-      return jerr('获取原歌词失败：' + (e && e.message || e), 500);
-    }
+  // 1) 拿原文
+  let lrc, title, artist;
+  try {
+    ({ lrc, title, artist } = await resolveSource(path, body, env, db));
+  } catch (e) {
+    return jerr('获取原歌词失败：' + (e && e.message || e), 500);
   }
   if (!lrc) return jerr('这首歌还没有原歌词，无法翻译', 400);
   if (!hasTimestamp(lrc)) return jerr('原文没有时间轴，暂不支持翻译（请先取到带时间戳的歌词）', 400);
@@ -316,20 +436,8 @@ export async function translateLyrics(req, env, db) {
   }
   if (!out.trans) return jerr(out.note || '翻译结果为空', 502);
 
-  // 3) 落库：写进 track_meta.trans，语义与"用户手填译文"完全一致（覆盖层，
-  //    不改动 lrc，也不影响原文来源）。用 upsert 避免碰到用户已填的 lrc/title 等字段。
-  try {
-    await db.prepare(
-      `INSERT INTO track_meta (path, trans, updated_at) VALUES (?1, ?2, ?3)
-       ON CONFLICT(path) DO UPDATE SET trans = excluded.trans, updated_at = excluded.updated_at`,
-    ).bind(path, out.trans, Date.now()).run();
-  } catch (e) {
-    if (!/no such table/i.test(String(e && e.message))) {
-      // 落库失败不该让用户白等一次翻译，译文照常返回，只是下次要重翻
-      console.error('translate store failed:', e && e.message);
-    }
-  }
-  // 手填译文不写 D1 lyrics / 边缘缓存（那是联网结果的缓存），前端拿返回值直接重渲染即可。
+  // 3) 落库 + 返回
+  await storeTrans(db, path, out.trans);
   return json({
     ok: true,
     trans: out.trans,

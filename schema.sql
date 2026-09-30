@@ -13,10 +13,12 @@ CREATE TABLE IF NOT EXISTS fs_nodes (
   created_at  TEXT NOT NULL,
   modified_at TEXT NOT NULL,
   nchunks     INTEGER NOT NULL DEFAULT 0,
-  db_id       INTEGER NOT NULL DEFAULT 1   -- 字节所在库 (1=主库 DB, 2=DB2 ...); 见 storage_dbs
+  db_id       INTEGER NOT NULL DEFAULT 1,  -- 字节所在库 (1=主库 DB, 2=DB2 ...); 见 storage_dbs
+  content_id  TEXT                          -- NULL = 旧格式 (字节在 'f:<path>'); 非空 = 内容寻址 'c:<id>'
 );
 CREATE INDEX IF NOT EXISTS idx_fs_parent ON fs_nodes(parent);
 CREATE INDEX IF NOT EXISTS idx_fs_name   ON fs_nodes(name);
+CREATE INDEX IF NOT EXISTS idx_fs_nodes_content ON fs_nodes(content_id);
 
 -- 文件内容分片 (1MB/片)。key: 'f:<path>' 文件管理器 / 'i:<filename>' 图床
 -- hash: 分片内容 SHA-256 十六进制 (前端计算); 用于断点续传时校验同名分片内容一致
@@ -28,6 +30,18 @@ CREATE TABLE IF NOT EXISTS blobs (
   PRIMARY KEY (key, idx)
 );
 
+-- 内容去重索引 (秒传): (hash, size) → content_id; 字节键 = 'c:<id>', 多条目共享一份存储
+CREATE TABLE IF NOT EXISTS contents (
+  id         TEXT PRIMARY KEY,        -- 随机 content_id, 字节键 = 'c:<id>'
+  hash       TEXT NOT NULL,           -- 全文件 SHA-256 hex (前端计算)
+  size       INTEGER NOT NULL,
+  db_id      INTEGER NOT NULL DEFAULT 1,
+  nchunks    INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_hash_size ON contents(hash, size);
+CREATE INDEX IF NOT EXISTS idx_image_host_content ON image_host(content_id);
+
 -- 图床元数据（与原版 image_host.db 对应）
 CREATE TABLE IF NOT EXISTS image_host (
   filename      TEXT PRIMARY KEY,
@@ -35,7 +49,9 @@ CREATE TABLE IF NOT EXISTS image_host (
   mime_type     TEXT NOT NULL,
   size          INTEGER NOT NULL,
   upload_time   TEXT NOT NULL,
-  db_id         INTEGER NOT NULL DEFAULT 1  -- 字节所在库 (仅自持模式有效; 引用模式字节归源文件)
+  src_path      TEXT,                        -- NULL = 自持 (字节 'i:<filename>'); 非空 = 引用文件管理的 'f:<src_path>'
+  db_id         INTEGER NOT NULL DEFAULT 1,  -- 字节所在库 (仅自持模式有效; 引用模式字节归源文件)
+  content_id    TEXT                         -- 非空 = 内容寻址 (字节 'c:<id>', 可被秒传共享); NULL = 旧格式
 );
 
 -- 分享链接（与原版 share_data.db 对应; password 为 pbkdf2$salt$hash）
@@ -68,7 +84,9 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
   updated_at   INTEGER NOT NULL DEFAULT 0,
   b2_key       TEXT NOT NULL DEFAULT '',   -- 预留 (B2 方案未落地)
   merged_upto  INTEGER NOT NULL DEFAULT 0, -- complete 分批合并: 已合并进最终键的分片数
-  db_id        INTEGER NOT NULL DEFAULT 1  -- 钉库: 暂存分片与转正后的字节必须在同一个库
+  db_id        INTEGER NOT NULL DEFAULT 1, -- 钉库: 暂存分片与转正后的字节必须在同一个库
+  content_id   TEXT,                       -- 内容键 id (合并目标 'c:<id>'); NULL = 旧会话
+  content_hash TEXT                         -- 全文件 SHA-256 (前端算); complete 时注册 contents 去重索引
 );
 CREATE INDEX IF NOT EXISTS idx_us_file_key ON upload_sessions(file_key);
 

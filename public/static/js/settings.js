@@ -13,9 +13,11 @@ const AppSettings = {
         download_direct:  4194304,   // 直下阈值: ≤此值走浏览器原生下载(无完整性校验), 档位见 DIRECT_TIERS
         // 歌词: provider=原文来源, trans_provider=译文来源, netease_base=自部署地址(仅登录态下发)
         // ai_*: 「AI 翻译」按钮用的 OpenAI 兼容接口(地址/模型/密钥均可在此配置, 任意厂商)
+        // ai_mode: server=服务端直连(默认) / local=浏览器直连本地模型(Ollama/LM Studio, 免内网穿透)
         lyrics: {
             enabled: true, provider: 'auto', trans_provider: 'off', netease_base: '',
-            ai_enabled: false, ai_model: 'Qwen/Qwen3-8B', ai_base: 'https://api.siliconflow.cn/v1', ai_key: '',
+            ai_enabled: false, ai_mode: 'server', ai_model: 'Qwen/Qwen3-8B',
+            ai_base: 'https://api.siliconflow.cn/v1', ai_key: '',
         },
         // 上传前压缩默认档位(与服务端 DEFAULTS.compress / compress.js 的 TIERS 一致)
         compress: { enabled: true, img_res: 'original', vid_res: 'original', quality: 'high' },
@@ -68,6 +70,7 @@ const AppSettings = {
             trans_provider: l.trans_provider || 'off',
             netease_base: typeof l.netease_base === 'string' ? l.netease_base : '',
             ai_enabled: l.ai_enabled === true,
+            ai_mode: l.ai_mode === 'local' ? 'local' : 'server',
             ai_model: typeof l.ai_model === 'string' && l.ai_model ? l.ai_model : this.defaults.lyrics.ai_model,
             ai_base: typeof l.ai_base === 'string' && l.ai_base ? l.ai_base : this.defaults.lyrics.ai_base,
             ai_key: typeof l.ai_key === 'string' ? l.ai_key : '',
@@ -322,6 +325,7 @@ const SettingsUI = {
         this._mb('setLyricsTrans').value = lyr.trans_provider;
         this._mb('setNeteaseBase').value = lyr.netease_base;
         this._mb('setAiEnabled').checked = lyr.ai_enabled;
+        this._mb('setAiMode').value = lyr.ai_mode;
         this._mb('setAiModel').value = lyr.ai_model;
         this._mb('setAiBase').value = lyr.ai_base;
         this._mb('setAiKey').value = lyr.ai_key || '';
@@ -374,7 +378,7 @@ const SettingsUI = {
             if (!aiModel) throw new Error('已启用 AI 翻译，请填写模型名（如 Qwen/Qwen3-8B）');
             if (!/^https?:\/\/\S+$/i.test(aiBase)) throw new Error('已启用 AI 翻译，请填写合法的接口地址（http/https 开头）');
         }
-        // 密钥不强制: 留空回落服务端 env 兜底; 填了则以配置里的为准
+        // 密钥不强制: 服务端调用留空回落 env 兜底; 本地调用(网关要鉴权时)按需填写
         const aiKey = String(this._mb('setAiKey').value || '').trim().slice(0, 300);
         return {
             enabled: this._mb('setLyricsEnabled').checked,
@@ -382,6 +386,7 @@ const SettingsUI = {
             trans_provider: trans,
             netease_base: base,
             ai_enabled: aiOn,
+            ai_mode: this._mb('setAiMode').value === 'local' ? 'local' : 'server',
             ai_model: aiModel,
             ai_base: aiBase,
             ai_key: aiKey,

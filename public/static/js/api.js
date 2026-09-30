@@ -302,10 +302,16 @@ const API = {
         if (opts.fileKey) body.file_key = opts.fileKey;
         if (opts.fileSize) body.file_size = opts.fileSize;
         if (opts.chunkSize) body.chunk_size = opts.chunkSize;
+        // 全文件 SHA-256: complete 时注册去重索引 (秒传), 传完还能竞态去重
+        if (opts.fileHash) body.file_hash = opts.fileHash;
         const res = await this.request('POST', '/api/files/upload/init', body);
         if (!res.ok) throw await this._uploadError(res, '初始化上传失败');
         return res.json();
     },
+    // 秒传探测: 前端算好全文件 SHA-256 后先打这里; 命中返回 {dedup:true, ...},
+    // 服务端已直接建好引用行, 零字节传输。未命中 {dedup:false}, 照常上传。
+    // kind=file 需 path (目标完整路径); kind=image 需 name (原始文件名)。
+    dedupCheck(payload) { return this.json('POST', '/api/upload/dedup', payload); },
     // 查询会话已传分片 (页面刷新/换设备后恢复进度)
     uploadStatus(uploadId) {
         return this.json('GET', `/api/files/upload/status?upload_id=${encodeURIComponent(uploadId)}`);
@@ -416,6 +422,30 @@ const API = {
             duration: opts.duration || 0,
         });
     },
+    // 本地模型翻译两段式第一步(op=split): 服务端拆时间戳后下发待翻文本 + 全部调用参数
+    lyricsTlSplit(path, opts = {}) {
+        return this.json('POST', '/api/lyrics/translate', {
+            path,
+            op: 'split',
+            lrc: opts.lrc || '',
+            title: opts.title || '',
+            artist: opts.artist || '',
+            duration: opts.duration || 0,
+        });
+    },
+    // 两段式第二步(op=finish): 译文数组交回服务端, 按索引拼回时间戳并落库;
+    // translations 与 split 下发的 texts 一一对应, 失败行传空串(null 亦可)
+    lyricsTlFinish(path, opts = {}) {
+        return this.json('POST', '/api/lyrics/translate', {
+            path,
+            op: 'finish',
+            lrc: opts.lrc || '',
+            translations: opts.translations || [],
+            calls: opts.calls || 0,
+            failed: opts.failed || 0,
+            last_err: opts.lastErr || '',
+        });
+    },
     // 专辑封面在线查找(内嵌封面缺失时的兜底): 网易云(自部署) > Deezer > iTunes, Worker 侧缓存
     cover(path, opts = {}) {
         const p = new URLSearchParams({ path });
@@ -435,6 +465,8 @@ const API = {
         if (opts.chunkSize) body.chunk_size = opts.chunkSize;
         // 文件指纹: 服务端命中未完成的同源会话则复用 (返回 resumed/received), 与文件上传同协议
         if (opts.fileKey) body.file_key = opts.fileKey;
+        // 全文件 SHA-256: complete 时注册去重索引 (秒传)
+        if (opts.fileHash) body.file_hash = opts.fileHash;
         const res = await this.request('POST', '/api/image-host/upload/init', body);
         if (!res.ok) throw await this._uploadError(res, '初始化上传失败');
         return res.json();
