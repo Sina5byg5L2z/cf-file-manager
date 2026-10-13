@@ -158,15 +158,24 @@ D1 免费版**单个库硬上限 500MB**。分库把文件字节按「文件」�
 
 ### 老版本升级
 
-已部署过旧版本的用户执行一次（新装用户不需要，`schema.sql` 已包含全部表）：
+已部署过旧版本的用户按顺序执行（新装用户不需要，`schema.sql` 已是最终结构）。迁移脚本全部幂等，中断后可直接重跑：
 
 ```bash
+# 1) 2026-09 系列增量（此前按旧版 README 执行过的可跳过）
 npx wrangler d1 execute file-manager --remote --file=./migrations/2026-09-15-db-sharding.sql
 npx wrangler d1 execute file-manager --remote --file=./migrations/2026-09-15-track-meta.sql    # 音乐播放器（不执行则首次使用时自动建表）
 npx wrangler d1 execute file-manager --remote --file=./migrations/2026-09-16-lyrics-reject.sql # 歌词拉黑（同上）
 npx wrangler d1 execute file-manager --remote --file=./migrations/2026-09-16-lyrics-store.sql  # 歌词持久化（同上）
 npx wrangler d1 execute file-manager --remote --file=./migrations/2026-09-18-token-version.sql # 令牌可撤销（同上；不执行则撤销能力缺失，登录不受影响）
 npx wrangler d1 execute file-manager --remote --file=./migrations/2026-09-30-content-dedup.sql # 秒传/内容去重（同上；不执行则上传报错，务必执行）
+
+# 2) 2026-10-13 数据库规范化（底层重构，旧数据原地升级，不丢文件）
+npx wrangler d1 execute file-manager --remote --file=./migrations/2026-10-13-stage0-baseline.sql # 迁移台账 + 补齐表/索引
+node migrations/migrate-stage1.mjs --remote   # 历史文件字节统一为内容寻址（只改键名，不搬数据）
+node migrations/migrate-stage2.mjs --remote   # 主键改为 id，跨表引用不再受改名影响
+npx wrangler deploy                            # ★ 先发新代码，再做下一步（下一步会删旧列）
+node migrations/migrate-stage3.mjs --remote   # 清除过渡冗余列，加完整性约束
+node tools/cleanup-old-tables.mjs --remote    # 可选：导出冷备后清理迁移回滚表，释放空间
 ```
 
 ## 目录结构
@@ -182,11 +191,13 @@ src/         Worker 后端（纯原生 fetch handler，无框架）
   storage.js   存储分库路由（库注册表 / 选库 / 容量告警 / 注册与启用接口）
   blobops.js   跨库字节操作与补偿重试
   lyrics.js    歌词代理（LRCLIB / lrc.cx / 网易云）与专辑封面直链
-  trackmeta.js 歌曲元数据（手动标题 / 歌手 / 歌词覆盖，path 主键）
+  trackmeta.js 歌曲元数据（手动标题 / 歌手 / 歌词覆盖，绑定文件本身，改名不丢失）
+  dedup.js     内容寻址去重（秒传探测、共享存储的引用计数回收）
+  diag.js      每日完整性诊断（定时任务只读核查引用悬空等问题）
 public/      前端（原生 JS；vendored: marked / DOMPurify / KaTeX / highlight.js）
-tools/       hash-password.mjs 密码哈希生成；build-fileicons.mjs 文件图标构建
+tools/       hash-password.mjs 密码哈希生成；build-fileicons.mjs 文件图标构建；cleanup-old-tables.mjs 迁移回滚表清理
 schema.sql   D1 建表脚本
-migrations/  老版本升级用的增量 DDL（新装用户无需关心）
+migrations/  老版本升级用的增量 DDL 与数据迁移脚本（新装用户无需关心）
 ```
 
 ## License

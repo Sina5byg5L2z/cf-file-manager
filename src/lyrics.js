@@ -234,7 +234,8 @@ async function resolveCover(env, db, opts) {
   let artist = String(opts.artist || '').trim();
   let meta = null;
   try {
-    meta = await db.prepare('SELECT title, artist FROM track_meta WHERE path = ?1').bind(path).first();
+    const nid = await nodeIdOf(db, path);
+    if (nid) meta = await db.prepare('SELECT title, artist FROM track_meta WHERE node_id = ?1').bind(nid).first();
   } catch { /* 未执行迁移时忽略 */ }
   if (!title && meta && meta.title) title = meta.title;
   if (!artist && meta && meta.artist) artist = meta.artist;
@@ -279,8 +280,17 @@ async function resolveCover(env, db, opts) {
 //   "没找到"不入库: 边缘缓存的 MISS_TTL(6 小时)足够挡住重复上游请求, 也不会把"当时没找到"长期钉死。
 const DUR_TOLERANCE = 2;                   // 时长容忍: 库内时长与请求时长差 >2s 视为不是同一版本
 
+// path → node_id。Stage 2 起歌词/元数据按 node_id 关联: 文件改名/移动后自动跟随
+// (旧实现以 path 为主键, 改名即失联)。
+async function nodeIdOf(db, path) {
+  try {
+    const r = await db.prepare('SELECT id FROM fs_nodes WHERE path = ?1').bind(path).first();
+    return (r && r.id) || 0;
+  } catch { return 0; }
+}
+
 const CREATE_SQL = `CREATE TABLE IF NOT EXISTS lyrics (
-  path       TEXT PRIMARY KEY,
+  node_id    INTEGER PRIMARY KEY,
   found      INTEGER NOT NULL DEFAULT 0,
   source     TEXT,
   synced     TEXT,
@@ -300,9 +310,11 @@ async function ensureStore(db) {
 // 读一条; 表不存在时自愈建表并当作未命中
 async function storeGet(db, path) {
   try {
+    const nid = await nodeIdOf(db, path);
+    if (!nid) return null;
     return await db.prepare(
-      'SELECT path, found, source, synced, plain, trans, roma, title, artist, duration, fetched_at FROM lyrics WHERE path = ?1',
-    ).bind(path).first() || null;
+      'SELECT found, source, synced, plain, trans, roma, title, artist, duration, fetched_at FROM lyrics WHERE node_id = ?1',
+    ).bind(nid).first() || null;
   } catch (e) {
     if (!/no such table/i.test(String(e && e.message))) return null;   // 读失败不影响播放
     await ensureStore(db);
@@ -313,8 +325,10 @@ async function storeGet(db, path) {
 // 写一条。只写"取到歌词"的结果; 写失败只记日志, 不影响本次返回 —— 歌词是可选增强, 不能拖垮播放。
 async function storePut(db, path, result, meta) {
   if (!result || !result.found) return;   // 空结果不落库(交给边缘缓存 6 小时)
+  const nid = await nodeIdOf(db, path);
+  if (!nid) return;                        // 文件不存在 → 不落库
   const args = [
-    path,
+    nid,
     1,
     result.source || null,
     result.synced || null,
@@ -326,9 +340,9 @@ async function storePut(db, path, result, meta) {
     Number.isFinite(meta && meta.duration) ? meta.duration : 0,
     Date.now(),
   ];
-  const sql = `INSERT INTO lyrics (path, found, source, synced, plain, trans, roma, title, artist, duration, fetched_at)
+  const sql = `INSERT INTO lyrics (node_id, found, source, synced, plain, trans, roma, title, artist, duration, fetched_at)
     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
-    ON CONFLICT(path) DO UPDATE SET
+    ON CONFLICT(node_id) DO UPDATE SET
       found = excluded.found, source = excluded.source, synced = excluded.synced, plain = excluded.plain,
       trans = excluded.trans, roma = excluded.roma, title = excluded.title, artist = excluded.artist,
       duration = excluded.duration, fetched_at = excluded.fetched_at`;
@@ -346,7 +360,10 @@ async function storePut(db, path, result, meta) {
 // 删除(=失效)。拉黑来源、撤销拉黑、修改歌曲信息时调用; 也用于清理历史遗留的空结果行。
 export async function clearStoredLyrics(db, path) {
   if (!path) return;
-  try { await db.prepare('DELETE FROM lyrics WHERE path = ?1').bind(path).run(); } catch { /* 表缺失无需处理 */ }
+  try {
+    const nid = await nodeIdOf(db, path);
+    if (nid) await db.prepare('DELETE FROM lyrics WHERE node_id = ?1').bind(nid).run();
+  } catch { /* 表缺失无需处理 */ }
 }
 
 function rowToResult(row) {
@@ -408,7 +425,8 @@ export async function resolveLyrics(env, db, opts) {
   //    绝不能因为填了译文就把联网拿到的原文丢掉(用户只想要译文补充, 不是想删掉原文)。
   let meta = null;
   try {
-    meta = await db.prepare('SELECT title, artist, lrc, trans FROM track_meta WHERE path = ?1').bind(path).first();
+    const nid = await nodeIdOf(db, path);
+    if (nid) meta = await db.prepare('SELECT title, artist, lrc, trans FROM track_meta WHERE node_id = ?1').bind(nid).first();
   } catch { /* 未执行迁移时忽略, 回落到在线源 */ }
   const manualLrc = (meta && meta.lrc) ? meta.lrc : null;
   const manualTrans = (meta && meta.trans) ? meta.trans : null;
@@ -551,13 +569,15 @@ function chainOf(cfg) {
 
 async function ensureRejectTable(db) {
   try {
-    await db.prepare("CREATE TABLE IF NOT EXISTS lyrics_reject (path TEXT PRIMARY KEY, sources TEXT NOT NULL DEFAULT '[]', ts INTEGER NOT NULL)").run();
+    await db.prepare("CREATE TABLE IF NOT EXISTS lyrics_reject (node_id INTEGER PRIMARY KEY, sources TEXT NOT NULL DEFAULT '[]', ts INTEGER NOT NULL)").run();
   } catch { /* 表已存在 / 只读连接: 后续读写各自容错 */ }
 }
 
 async function rejectsOf(db, path) {
   try {
-    const row = await db.prepare('SELECT sources FROM lyrics_reject WHERE path = ?1').bind(path).first();
+    const nid = await nodeIdOf(db, path);
+    if (!nid) return [];
+    const row = await db.prepare('SELECT sources FROM lyrics_reject WHERE node_id = ?1').bind(nid).first();
     const arr = row && row.sources ? JSON.parse(row.sources) : [];
     return Array.isArray(arr) ? arr : [];
   } catch { return []; }
@@ -613,9 +633,11 @@ export async function rejectLyrics(req, env, db) {
     sources = cur;
   }
   await ensureRejectTable(db);
+  const nid = await nodeIdOf(db, path);
+  if (!nid) return jerr('文件不存在', 404);
   await db.prepare(
-    'INSERT INTO lyrics_reject (path, sources, ts) VALUES (?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET sources = ?2, ts = ?3'
-  ).bind(path, JSON.stringify(sources), Date.now()).run();
+    'INSERT INTO lyrics_reject (node_id, sources, ts) VALUES (?1, ?2, ?3) ON CONFLICT(node_id) DO UPDATE SET sources = ?2, ts = ?3'
+  ).bind(nid, JSON.stringify(sources), Date.now()).run();
 
   // D1 歌词一并失效: 库里可能存着刚被拉黑那个源的结果, 不清掉下次就直接端回来了
   await clearStoredLyrics(db, path);
@@ -663,12 +685,15 @@ export async function unRejectLyrics(req, env, db, url) {
     sources = [];                                    // 全撤销
   }
 
-  if (!sources.length) {
-    await db.prepare('DELETE FROM lyrics_reject WHERE path = ?1').bind(path).run();
-  } else {
-    await db.prepare(
-      'INSERT INTO lyrics_reject (path, sources, ts) VALUES (?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET sources = ?2, ts = ?3'
-    ).bind(path, JSON.stringify(sources), Date.now()).run();
+  const nid = await nodeIdOf(db, path);
+  if (nid) {
+    if (!sources.length) {
+      await db.prepare('DELETE FROM lyrics_reject WHERE node_id = ?1').bind(nid).run();
+    } else {
+      await db.prepare(
+        'INSERT INTO lyrics_reject (node_id, sources, ts) VALUES (?1, ?2, ?3) ON CONFLICT(node_id) DO UPDATE SET sources = ?2, ts = ?3'
+      ).bind(nid, JSON.stringify(sources), Date.now()).run();
+    }
   }
 
   // 撤销拉黑 = 允许重新联网获取: D1 里的结果也要清掉, 否则缓存命中就直接端回来了

@@ -7,8 +7,7 @@
 //   NULL = 用户没设置过, 读取时回落到下一来源
 //   空字符串与 NULL 不同: 前端用 null 表示"清空", 不传表示"不动"
 //
-// 注意: 文件改名/移动时本行不跟随(以 path 为主键)。改名后视为新条目,
-// 自动回落到内嵌标签/文件名解析, 旧行留着无害(不参与任何查询)。
+// Stage 2: 以 node_id 为主键 —— 文件改名/移动后本行自动跟随 (旧实现以 path 为主键, 改名即失联)。
 // ============================================================================
 import { json, jerr, sanitizeRel } from './util.js';
 import { clearStoredLyrics, clearLyricsCache } from './lyrics.js';
@@ -17,8 +16,16 @@ const MAX_FIELD = 400;        // title/artist/album 最大长度
 const MAX_LRC = 300 * 1024;   // 单段歌词文本上限 300KB
 const OFFSET_LIMIT = 30000;   // 歌词偏移上限 ±30 秒
 
+// path → node_id (0 = 文件不存在)
+async function nodeIdOf(db, path) {
+  try {
+    const r = await db.prepare('SELECT id FROM fs_nodes WHERE path = ?1').bind(path).first();
+    return (r && r.id) || 0;
+  } catch { return 0; }
+}
+
 const CREATE_SQL = `CREATE TABLE IF NOT EXISTS track_meta (
-  path         TEXT PRIMARY KEY,
+  node_id      INTEGER PRIMARY KEY,
   title        TEXT,
   artist       TEXT,
   album        TEXT,
@@ -68,9 +75,10 @@ export async function getMeta(_req, _env, db, url) {
   if (!path) return jerr('缺少 path');
   let row;
   try {
-    row = await db.prepare(
-      'SELECT title, artist, album, lyric_offset, lrc, trans, source, updated_at FROM track_meta WHERE path = ?1',
-    ).bind(path).first();
+    const nid = await nodeIdOf(db, path);
+    if (nid) row = await db.prepare(
+      'SELECT title, artist, album, lyric_offset, lrc, trans, source, updated_at FROM track_meta WHERE node_id = ?1',
+    ).bind(nid).first();
   } catch (e) {
     // 未执行迁移时自愈建表, 然后按"无记录"返回(不影响播放)
     if (!/no such table/i.test(String(e && e.message))) throw e;
@@ -100,27 +108,31 @@ export async function putMeta(req, env, db) {
 
   // 改之前先把旧标题/歌手读出来 —— 边缘缓存键是按 (provider, artist, title, duration) 拼的,
   // 只清新键会漏掉旧键, 那份旧歌词会继续 HIT 30 天。读取失败不影响保存。
+  // node_id: 元数据挂在具体文件上, 文件必须存在
+  const nid = await nodeIdOf(db, path);
+  if (!nid) return jerr('文件不存在', 404);
+
   let old = null;
   try {
-    old = await db.prepare('SELECT title, artist FROM track_meta WHERE path = ?1').bind(path).first();
+    old = await db.prepare('SELECT title, artist FROM track_meta WHERE node_id = ?1').bind(nid).first();
   } catch { /* 表缺失: 说明是首次写入, 没有旧缓存要清 */ }
 
   try {
     await db.prepare(
-      `INSERT INTO track_meta (path, title, artist, album, lyric_offset, lrc, trans, source, updated_at)
+      `INSERT INTO track_meta (node_id, title, artist, album, lyric_offset, lrc, trans, source, updated_at)
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-       ON CONFLICT(path) DO UPDATE SET
+       ON CONFLICT(node_id) DO UPDATE SET
          title = excluded.title, artist = excluded.artist, album = excluded.album,
          lyric_offset = excluded.lyric_offset, lrc = excluded.lrc, trans = excluded.trans,
          source = excluded.source, updated_at = excluded.updated_at`,
-    ).bind(path, title, artist, album, offset, lrc, trans, source, now).run();
+    ).bind(nid, title, artist, album, offset, lrc, trans, source, now).run();
   } catch (e) {
     if (!/no such table/i.test(String(e && e.message))) throw e;
     await db.prepare(CREATE_SQL).run();
     await db.prepare(
-      `INSERT INTO track_meta (path, title, artist, album, lyric_offset, lrc, trans, source, updated_at)
+      `INSERT INTO track_meta (node_id, title, artist, album, lyric_offset, lrc, trans, source, updated_at)
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
-    ).bind(path, title, artist, album, offset, lrc, trans, source, now).run();
+    ).bind(nid, title, artist, album, offset, lrc, trans, source, now).run();
   }
 
   // 歌曲信息一改, 之前按旧标题/歌手存到 D1 的歌词就不一定还是这首歌了 → 失效重取。

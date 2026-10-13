@@ -1,12 +1,13 @@
 // ============================================================================
 // dedup.js — 内容寻址去重 (秒传)
 //
-// 存储模型 (2026-09-30 起, 见 migrations/2026-09-30-content-dedup.sql):
-//   新上传的字节落在 blobs 的内容键 'c:<content_id>' 下, fs_nodes / image_host
+// 存储模型 (Stage 1 迁移后, 见 migrations/2026-10-13-stage0/1):
+//   所有文件字节统一落在内容键 'c:<content_id>' 下, fs_nodes / image_host
 //   通过 content_id 列引用同一份字节 —— 多个文件条目共享一份存储。
+//   缩略图键为 't:<content_id>' (与内容绑定, 不再跟路径)。
 //   contents 表是 (hash, size) → content_id 的去重索引, 由前端算好的全文件
-//   SHA-256 驱动秒传探测。content_id 为 NULL 的行 = 历史数据, 仍按 'f:<path>'
-//   旧键读写 (不搬迁, 覆盖后自然转新格式)。
+//   SHA-256 驱动秒传探测。历史行 (曾按 'f:<path>'/'i:<filename>' 存储) 已由
+//   Stage 1 迁移回收为内容寻址 —— 代码不再有旧键分支。
 //
 // 引用计数:
 //   动态统计 fs_nodes + image_host 两张表的 content_id 引用数, 不单独建计数表
@@ -18,7 +19,7 @@
 //   引用行绝不落在已被回收的内容上。
 //
 // 不变式 (承接 storage.js):
-//   I1 t:<path> 缩略图与节点的 db_id 同库 (节点 db_id = 其内容的 db_id)
+//   I1 t:<cid> 缩略图与节点的 db_id 同库 (节点 db_id = 其内容的 db_id)
 //   I2 暂存 u:<id> 与合并目标 'c:<cid>' 同库 (upload_sessions.db_id 钉住)
 //   I5 字节先落、元数据后写; 删除时元数据先删、字节后删
 // ============================================================================
@@ -28,9 +29,11 @@ import { dbById, bumpUsage } from './storage.js';
 
 export function randomCid() { return randomId(16); }
 
-// 节点的字节键: 内容寻址行 → 'c:<id>'; 历史行 → 'f:<path>'
+// 节点的字节键。Stage 1 迁移后所有文件行的 content_id 均非空,
+// 字节键统一为 'c:<content_id>' —— 与路径彻底解耦 (改名/移动不再改写 blob 键)。
+// 目录行不调用本函数。
 export function blobKeyOf(node) {
-  return node.content_id ? 'c:' + node.content_id : 'f:' + node.path;
+  return 'c:' + node.content_id;
 }
 
 export function isValidHash(s) {
@@ -66,7 +69,20 @@ export async function dropContentIfOrphan(db, env, cid, dbId, size) {
   if (!cid) return false;
   if ((await contentRefs(db, cid)) > 0) return false;
   const vdb = dbById(env, dbId || 1) || db;
-  await vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind('c:' + cid).run();
+  // 内容字节 'c:<cid>' 与缩略图 't:<cid>' 一并回收 (缩略图与内容绑定, 不跟路径)
+  const keys = ['c:' + cid, 't:' + cid];
+  try {
+    await vdb.prepare('DELETE FROM blobs WHERE key = ?1 OR key = ?2').bind(keys[0], keys[1]).run();
+  } catch (e) {
+    // 字节删除失败 → 写 journal 由 cron 重试 (空间稀缺, 不留永久孤儿); 不阻断用户操作
+    const now = Date.now();
+    for (const k of keys) {
+      try {
+        await db.prepare('INSERT INTO blob_journal (op, db_id, old_key, created_at) VALUES (?1,?2,?3,?4)')
+          .bind('delete', dbId || 1, k, now).run();
+      } catch { /* noop */ }
+    }
+  }
   await db.prepare('DELETE FROM contents WHERE id = ?1').bind(cid).run();
   await bumpUsage(db, dbId || 1, -(size || 0));
   return true;

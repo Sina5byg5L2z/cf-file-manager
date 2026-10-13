@@ -13,7 +13,7 @@ import { blobKeyOf } from './dedup.js';
 import { shareLyrics, shareCover } from './lyrics.js';
 import { cookieValue, cookieHeader, isSecureReq, signPayload, verifyPayload } from './auth.js';
 
-const SHARE_COLS = 'id, path, password, expires_at, created_at, access_count, last_accessed_at';
+const SHARE_COLS = 'id, node_id, password, expires_at, created_at, access_count, last_accessed_at';
 
 async function getShareCached(db, id) {
   const ck = `SM:${id}`;
@@ -103,10 +103,12 @@ export async function createShare(req, env, db) {
   let body;
   try { body = await req.json(); } catch { return jerr('请求格式错误'); }
   const rel = sanitizeRel(body.path || '');
-  // 存在性校验 (根目录分享允许空路径)
+  // 存在性校验 (根目录分享允许空路径); 引用存 node_id (改名/移动后分享仍有效)
+  let nodeId = 0;
   if (rel) {
     const node = await getNode(db, rel);
     if (!node) return jerr('Path not found', 404);
+    nodeId = node.id;
   }
 
   const id = randomId(16);
@@ -117,8 +119,8 @@ export async function createShare(req, env, db) {
   const hash = body.password ? await hashPassword(String(body.password)) : null;
 
   const res = await db.prepare(
-    'INSERT INTO share_links (id, path, password, expires_at, created_at) VALUES (?1,?2,?3,?4,?5)',
-  ).bind(id, rel || '.', hash, expiresAt, now).run();
+    'INSERT INTO share_links (id, node_id, password, expires_at, created_at) VALUES (?1,?2,?3,?4,?5)',
+  ).bind(id, nodeId, hash, expiresAt, now).run();
   if (res.error) return jerr(`DB error: ${res.error}`, 500);
 
   const url = new URL(req.url);
@@ -126,7 +128,12 @@ export async function createShare(req, env, db) {
 }
 
 export async function listShares(req, env, db) {
-  const rows = await db.prepare(`SELECT ${SHARE_COLS} FROM share_links`).all();
+  // path 由 node_id JOIN 得出 (源目录改名后仍回显真实路径); 根分享 path='.'
+  const rows = await db.prepare(
+    `SELECT s.id, s.password, s.expires_at, s.created_at, s.access_count, s.last_accessed_at,
+            COALESCE(f.path, '.') AS path
+     FROM share_links s LEFT JOIN fs_nodes f ON f.id = s.node_id`,
+  ).all();
   const shares = (rows.results || []).map((r) => ({
     id: r.id,
     path: r.path,
@@ -173,7 +180,13 @@ export async function accessShare(req, env, db, id, url) {
     await cachePut(`SH:${id}`, json({ t: now }), 60);
   }
 
-  const basePath = sanitizeRel(link.path === '.' ? '' : link.path);
+  // 分享对象按 node_id 定位: 目录改名/移动后分享链接依然有效 (node_id=0 表示根目录)
+  let basePath = '';
+  if (link.node_id) {
+    const base = await db.prepare('SELECT path FROM fs_nodes WHERE id = ?1').bind(link.node_id).first();
+    if (!base) return jerr('分享内容已被删除', 404);
+    basePath = base.path;
+  }
 
   // 解析目标 (支持目录内 sub_path / name 导航); sanitizeRel 已过滤 .., 防穿越
   function resolveWithin(sub, name) {
@@ -289,14 +302,14 @@ export async function accessShare(req, env, db, id, url) {
     return json({
       type: 'directory',
       name: node.name || '',
-      path: link.path,
+      path: basePath || '.',
       entries: rows.map((r) => ({ name: r.name, is_dir: !!r.is_dir, size: r.is_dir ? 0 : r.size })),
     });
   }
   return json({
     type: 'file',
     name: node.name,
-    path: link.path,
+    path: basePath || '.',
     size: node.size,
     mime: node.mime || mimeFromName(node.name),
     ext: (node.name.split('.').pop() || '').toLowerCase(),

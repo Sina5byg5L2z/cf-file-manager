@@ -12,6 +12,7 @@ import * as dav from './webdav.js';
 import * as settings from './settings.js';
 import * as storageApi from './storage.js';
 import * as blobops from './blobops.js';
+import { diagIntegrity } from './diag.js';
 import * as lyrics from './lyrics.js';
 import * as trackmeta from './trackmeta.js';
 import * as translate from './translate.js';
@@ -48,6 +49,11 @@ export default {
     // 跨库改名/删除失败留下的待办: 重试到收敛 (孤儿字节与回滚失败的半改名都在这里消化)
     const retry = await blobops.journalRetry(env.DB, env, 200);
     if (retry.processed) console.log('blob_journal retry:', JSON.stringify(retry));
+    // 数据完整性诊断 (只读): 悬挂引用 / 路径与父 id 不一致 —— 有异常才打日志
+    try {
+      const issues = await diagIntegrity(env.DB);
+      if (issues.length) console.log('integrity issues:', JSON.stringify(issues));
+    } catch (e) { console.log('integrity diag failed:', e && e.message); }
     // 容量校准: 用 Cloudflare API 的真实 file_size 覆盖累加值 (未配置 CF_API_TOKEN 时自动跳过)
     const cal = await storageApi.calibrate(env.DB, env);
     if (!cal.ok) console.log('calibrate skipped:', cal.reason);

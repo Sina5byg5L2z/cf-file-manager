@@ -322,10 +322,13 @@ async function resolveSource(path, body, env, db) {
 // 不改动 lrc，也不影响原文来源）。用 upsert 避免碰到用户已填的 lrc/title 等字段。
 async function storeTrans(db, path, trans) {
   try {
+    // Stage 2: track_meta 以 node_id 为主键 (文件不存在则不落库)
+    const r = await db.prepare('SELECT id FROM fs_nodes WHERE path = ?1').bind(path).first();
+    if (!r) return;
     await db.prepare(
-      `INSERT INTO track_meta (path, trans, updated_at) VALUES (?1, ?2, ?3)
-       ON CONFLICT(path) DO UPDATE SET trans = excluded.trans, updated_at = excluded.updated_at`,
-    ).bind(path, trans, Date.now()).run();
+      `INSERT INTO track_meta (node_id, trans, updated_at) VALUES (?1, ?2, ?3)
+       ON CONFLICT(node_id) DO UPDATE SET trans = excluded.trans, updated_at = excluded.updated_at`,
+    ).bind(r.id, trans, Date.now()).run();
   } catch (e) {
     if (!/no such table/i.test(String(e && e.message))) {
       // 落库失败不该让用户白等一次翻译，译文照常返回，只是下次要重翻

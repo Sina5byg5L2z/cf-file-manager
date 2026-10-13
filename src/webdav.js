@@ -7,12 +7,11 @@
 import { sanitizeRel, mimeFromName, subtreeMatch } from './util.js';
 import { getNode, serveFileContent, ensureDirs, moveNode, invalidateFileCache,
   ihRefs, ihRefsMessage, syncIhOnOverwrite, deleteSubtree, releaseOldContent } from './vfs.js';
-import { blobKeyOf } from './dedup.js';
+import { blobKeyOf, randomCid } from './dedup.js';
 import { verifyCredentials } from './auth.js';
 import { dbById, pickDb, capacityResponse, bumpUsage } from './storage.js';
-import { copyBlobKeys } from './blobops.js';
 
-const NODE_COLS = 'path, parent, name, is_dir, size, mime, created_at, modified_at, nchunks, db_id, content_id';
+const NODE_COLS = 'id, parent_id, path, name, is_dir, size, mime, created_at, modified_at, nchunks, db_id, content_id';
 
 function xmlEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -125,10 +124,10 @@ async function propfind(db, clean) {
   // Depth 1: 列子项
   let children = [];
   if (clean) {
-    const rows = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE parent = ?1`).bind(clean).all();
+    const rows = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE parent_id = COALESCE((SELECT id FROM fs_nodes WHERE path = ?1), 0)`).bind(clean).all();
     children = rows.results || [];
   } else {
-    const rows = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE parent = ''`).all();
+    const rows = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE parent_id = 0`).all();
     children = rows.results || [];
   }
   const body = `<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">` +
@@ -165,7 +164,8 @@ async function davPut(req, env, db, clean) {
     vdb = picked.db;
   }
 
-  // 流式分片写入, 内存占用恒定
+  // 流式分片写入内容键 'c:<cid>' (与 vfs 上传一致的内容寻址语义), 内存占用恒定
+  const cid = randomCid();
   const max = 200 * 1024 * 1024;
   const reader = req.body.getReader();
   const blobStmts = [];   // 字节侧: 在目标库上执行
@@ -181,34 +181,31 @@ async function davPut(req, env, db, clean) {
     merged.set(buf); merged.set(value, buf.length);
     buf = merged;
     while (buf.length >= 1024 * 1024) {
-      blobStmts.push(vdb.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) VALUES (?1,?2,?3)').bind('f:' + sp.path, idx++, buf.slice(0, 1024 * 1024)));
+      blobStmts.push(vdb.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) VALUES (?1,?2,?3)').bind('c:' + cid, idx++, buf.slice(0, 1024 * 1024)));
       buf = buf.slice(1024 * 1024);
     }
   }
   if (buf.length || idx === 0) {
-    blobStmts.push(vdb.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) VALUES (?1,?2,?3)').bind('f:' + sp.path, idx++, buf));
+    blobStmts.push(vdb.prepare('INSERT OR REPLACE INTO blobs (key, idx, data) VALUES (?1,?2,?3)').bind('c:' + cid, idx++, buf));
   }
   const now = new Date().toISOString();
-  blobStmts.push(vdb.prepare('DELETE FROM blobs WHERE key = ?1 AND idx >= ?2').bind('f:' + sp.path, idx));
-  // 覆盖写时内容已变, 旧缩略图作废
-  blobStmts.push(vdb.prepare('DELETE FROM blobs WHERE key = ?1').bind('t:' + sp.path));
+  blobStmts.push(vdb.prepare('DELETE FROM blobs WHERE key = ?1 AND idx >= ?2').bind('c:' + cid, idx));
   // 字节先落 (单库 batch 原子)
   await vdb.batch(blobStmts);
   // 元数据后写 (I5): 此刻字节已经就位, 才让文件对用户可见。
-  // WebDAV 客户端 (Windows 资源管理器等) 算不了全文件哈希 → 不做秒传,
-  // 新行 content_id 为 NULL (旧格式路径键), 行为与迁移前一致。
-  await db.prepare('INSERT OR REPLACE INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id,content_id) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7,?8,NULL)')
-    .bind(clean, parent, name, size, mimeFromName(name), now, idx, targetId).run();
-  // 旧内容释放: 内容寻址旧节点 → 引用计数归零才回收字节, 用量由它内部记帐;
-  // 历史行字节已被上面的覆盖写在同一路径键下就地替换, 只需按净增记帐
+  // WebDAV 客户端算不了全文件哈希 → 不参与秒传, 但仍写内容寻址键 (content_id = cid),
+  // 使本行与其余上传路径统一 —— 改名/移动不再需要改写 blob 键。
+  await db.prepare('INSERT INTO fs_nodes (path,parent_id,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id,content_id) VALUES (?1, COALESCE((SELECT id FROM fs_nodes WHERE path = ?2), 0), ?3,0,?4,?5,?6,?6,?7,?8,?9) ON CONFLICT(path) DO UPDATE SET parent_id=excluded.parent_id, name=excluded.name, size=excluded.size, mime=excluded.mime, modified_at=excluded.modified_at, nchunks=excluded.nchunks, db_id=excluded.db_id, content_id=excluded.content_id')
+    .bind(clean, parent, name, size, mimeFromName(name), now, idx, targetId, cid).run();
+  // 旧内容释放: 引用计数归零才回收字节 + 缩略图 (dropContentIfOrphan 内部记帐)
   if (old && !old.is_dir && old.content_id) {
-    await releaseOldContent(db, env, old, clean);
+    await releaseOldContent(db, env, old);
   } else {
     await bumpUsage(db, targetId, size - (old && !old.is_dir ? old.size : 0));
   }
   if (old && !old.is_dir) await invalidateFileCache(clean, old.size);
   // 被图床引用的源文件被覆盖: 直链内容跟随变化
-  if (old && !old.is_dir) await syncIhOnOverwrite(db, clean, size, old.size);
+  if (old && !old.is_dir) await syncIhOnOverwrite(db, clean, size, old.size, old.content_id);
   return new Response(null, { status: 201 });
 }
 
@@ -261,41 +258,25 @@ async function davMoveCopy(req, env, db, srcClean, isMove) {
     const r = await moveNode(db, env, srcClean, destParent, destName);
     if (r.error) return new Response(null, { status: 400 });
   } else {
-    // COPY: 字节留在源文件各自的库 (同库 INSERT..SELECT, 字节不过 Worker 内存), 元数据最后写 (I5)。
-    // 内容寻址行零拷贝: 新行引用同一份 content_id, 只有按路径存的缩略图跟一份。
+    // COPY: 元数据行全量复制并沿用同一 content_id —— 字节零拷贝 (多个行引用一份
+    // 'c:<cid>'); 缩略图键也是 't:<cid>' 与路径无关, 副本自动共享, 无需复制字节。
     const now = new Date().toISOString();
     if (src.is_dir) {
-      const sub = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE ${subtreeMatch('path')}`).bind(srcClean).all();
+      const sub = await db.prepare(`SELECT ${NODE_COLS} FROM fs_nodes WHERE ${subtreeMatch('path')} ORDER BY length(path) ASC`).bind(srcClean).all();
       const off = srcClean.length;
       const stmts = [];
-      const pairs = [];       // 历史行: f:/t: 全拷
-      const thumbPairs = [];  // 内容行: 只拷 t:
       for (const r of sub.results || []) {
         const np = dest + r.path.slice(off);
-        const npParent = r.path === srcClean ? destParent : dest + r.parent.slice(off);
+        const npParent = np.includes('/') ? np.slice(0, np.lastIndexOf('/')) : '';
         const nName = r.path === srcClean ? destName : r.name;
-        stmts.push(db.prepare('INSERT INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id,content_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)')
+        stmts.push(db.prepare('INSERT INTO fs_nodes (path,parent_id,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id,content_id) VALUES (?1, COALESCE((SELECT id FROM fs_nodes WHERE path = ?2), 0), ?3,?4,?5,?6,?7,?8,?9,?10,?11)')
           .bind(np, npParent, nName, r.is_dir, r.size, r.mime, r.created_at, now, r.nchunks, r.db_id || 1, r.content_id || null));
-        if (!r.is_dir) {
-          if (r.content_id) thumbPairs.push({ src: r.path, dst: np, db_id: r.db_id || 1 });
-          else pairs.push({ src: r.path, dst: np, db_id: r.db_id || 1 });
-        }
       }
-      if (pairs.length) await copyBlobKeys(db, env, pairs);
-      if (thumbPairs.length) await copyBlobKeys(db, env, thumbPairs, 'thumb');
       await db.batch(stmts);
-    } else if (src.content_id) {
-      // 内容寻址单文件: 字节零拷贝, 新行引用同一份 content_id (db_id 随内容)
-      await copyBlobKeys(db, env, [{ src: srcClean, dst: dest, db_id: src.db_id || 1 }], 'thumb');
-      await db.batch([
-        db.prepare('INSERT INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id,content_id) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7,?8,?9)')
-          .bind(dest, destParent, destName, src.size, src.mime, now, src.nchunks, src.db_id || 1, src.content_id),
-      ]);
     } else {
-      await copyBlobKeys(db, env, [{ src: srcClean, dst: dest, db_id: src.db_id || 1 }]);
       await db.batch([
-        db.prepare('INSERT INTO fs_nodes (path,parent,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id,content_id) VALUES (?1,?2,?3,0,?4,?5,?6,?6,?7,?8,NULL)')
-          .bind(dest, destParent, destName, src.size, src.mime, now, src.nchunks, src.db_id || 1),
+        db.prepare('INSERT INTO fs_nodes (path,parent_id,name,is_dir,size,mime,created_at,modified_at,nchunks,db_id,content_id) VALUES (?1, COALESCE((SELECT id FROM fs_nodes WHERE path = ?2), 0), ?3,0,?4,?5,?6,?6,?7,?8,?9)')
+          .bind(dest, destParent, destName, src.size, src.mime, now, src.nchunks, src.db_id || 1, src.content_id),
       ]);
     }
   }

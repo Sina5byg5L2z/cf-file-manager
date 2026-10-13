@@ -1,24 +1,28 @@
 -- file-manager (Workers 版) D1 schema
 -- 执行: wrangler d1 execute file-manager --remote --file=./schema.sql
 
--- 虚拟文件系统: 目录与文件统一存一张表
--- path 形如 ""(根) / "docs" / "docs/a.txt"; parent 是父目录 path; name 是自身名
+-- 虚拟文件系统: 目录与文件统一存一张表 (Stage 3 规范化)
+--   id / parent_id 为唯一事实源 (稳定代理键 + 自引用, parent_id=0 表示根);
+--   path 是物化路径 (前端契约与子树前缀查询依赖它, 属正当设计, 刻意保留)。
 CREATE TABLE IF NOT EXISTS fs_nodes (
-  path        TEXT PRIMARY KEY,
-  parent      TEXT NOT NULL DEFAULT '',
+  id          INTEGER PRIMARY KEY,
+  parent_id   INTEGER NOT NULL DEFAULT 0 CHECK (parent_id >= 0),
   name        TEXT NOT NULL,
-  is_dir      INTEGER NOT NULL,
-  size        INTEGER NOT NULL DEFAULT 0,
+  path        TEXT NOT NULL,
+  is_dir      INTEGER NOT NULL CHECK (is_dir IN (0,1)),
+  size        INTEGER NOT NULL DEFAULT 0 CHECK (size >= 0),
   mime        TEXT NOT NULL DEFAULT '',
   created_at  TEXT NOT NULL,
   modified_at TEXT NOT NULL,
-  nchunks     INTEGER NOT NULL DEFAULT 0,
-  db_id       INTEGER NOT NULL DEFAULT 1,  -- 字节所在库 (1=主库 DB, 2=DB2 ...); 见 storage_dbs
-  content_id  TEXT                          -- NULL = 旧格式 (字节在 'f:<path>'); 非空 = 内容寻址 'c:<id>'
+  nchunks     INTEGER NOT NULL DEFAULT 0 CHECK (nchunks >= 0),
+  db_id       INTEGER NOT NULL DEFAULT 1 CHECK (db_id >= 1),  -- 字节所在库 (1=主库 DB, 2=DB2 ...)
+  content_id  TEXT,                          -- 文件行非空 (字节键 'c:<id>'); 目录行 NULL
+  CHECK (is_dir = 1 OR content_id IS NOT NULL)
 );
-CREATE INDEX IF NOT EXISTS idx_fs_parent ON fs_nodes(parent);
-CREATE INDEX IF NOT EXISTS idx_fs_name   ON fs_nodes(name);
-CREATE INDEX IF NOT EXISTS idx_fs_nodes_content ON fs_nodes(content_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_fs_path    ON fs_nodes(path);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_fs_sibling ON fs_nodes(parent_id, name);
+CREATE INDEX        IF NOT EXISTS ix_fs_parent  ON fs_nodes(parent_id);
+CREATE INDEX        IF NOT EXISTS ix_fs_content ON fs_nodes(content_id);
 
 -- 文件内容分片 (1MB/片)。key: 'f:<path>' 文件管理器 / 'i:<filename>' 图床
 -- hash: 分片内容 SHA-256 十六进制 (前端计算); 用于断点续传时校验同名分片内容一致
@@ -40,30 +44,35 @@ CREATE TABLE IF NOT EXISTS contents (
   created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_contents_hash_size ON contents(hash, size);
-CREATE INDEX IF NOT EXISTS idx_image_host_content ON image_host(content_id);
+-- 注: idx_image_host_content / idx_ih_src_path 必须排在 image_host 建表语句之后
+-- (原脚本把它排在建表之前, 单文件执行会因表不存在而失败)。见下方 image_host 定义后。
 
--- 图床元数据（与原版 image_host.db 对应）
+-- 图床元数据: src_node_id 为唯一引用 (引用 fs_nodes.id); 自持条目用 content_id
 CREATE TABLE IF NOT EXISTS image_host (
   filename      TEXT PRIMARY KEY,
   original_name TEXT NOT NULL,
   mime_type     TEXT NOT NULL,
-  size          INTEGER NOT NULL,
+  size          INTEGER NOT NULL CHECK (size >= 0),
   upload_time   TEXT NOT NULL,
-  src_path      TEXT,                        -- NULL = 自持 (字节 'i:<filename>'); 非空 = 引用文件管理的 'f:<src_path>'
-  db_id         INTEGER NOT NULL DEFAULT 1,  -- 字节所在库 (仅自持模式有效; 引用模式字节归源文件)
-  content_id    TEXT                         -- 非空 = 内容寻址 (字节 'c:<id>', 可被秒传共享); NULL = 旧格式
+  src_node_id   INTEGER,                     -- 非空 = 引用文件管理节点。改名/移动后引用不变; NULL = 自持
+  db_id         INTEGER NOT NULL DEFAULT 1 CHECK (db_id >= 1),
+  content_id    TEXT,                        -- 自持条目字节键 'c:<content_id>'; 引用型为 NULL
+  CHECK (NOT (src_node_id IS NOT NULL AND content_id IS NOT NULL))
 );
+CREATE INDEX IF NOT EXISTS ix_ih_src_node ON image_host(src_node_id);   -- 引用反查 (删除/覆盖源文件时)
+CREATE INDEX IF NOT EXISTS ix_ih_content  ON image_host(content_id);    -- 引用计数动态统计用
 
--- 分享链接（与原版 share_data.db 对应; password 为 pbkdf2$salt$hash）
+-- 分享链接: 引用 fs_nodes.id (0=根); 改名/移动后分享仍有效
 CREATE TABLE IF NOT EXISTS share_links (
   id               TEXT PRIMARY KEY,
-  path             TEXT NOT NULL,
+  node_id          INTEGER NOT NULL DEFAULT 0 CHECK (node_id >= 0),
   password         TEXT,
   expires_at       TEXT,
   created_at       TEXT NOT NULL,
-  access_count     INTEGER NOT NULL DEFAULT 0,
+  access_count     INTEGER NOT NULL DEFAULT 0 CHECK (access_count >= 0),
   last_accessed_at TEXT
 );
+CREATE INDEX IF NOT EXISTS ix_share_node ON share_links(node_id);
 
 -- 分片上传会话（分片先写入 blobs 的 'u:<id>' 暂存键，complete 时合并）
 -- file_key: 文件指纹 (前端计算: 文件名+大小+最后修改时间+首尾分片hash 的 SHA-256);
@@ -82,7 +91,6 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
   chunk_size   INTEGER NOT NULL DEFAULT 0,
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL DEFAULT 0,
-  b2_key       TEXT NOT NULL DEFAULT '',   -- 预留 (B2 方案未落地)
   merged_upto  INTEGER NOT NULL DEFAULT 0, -- complete 分批合并: 已合并进最终键的分片数
   db_id        INTEGER NOT NULL DEFAULT 1, -- 钉库: 暂存分片与转正后的字节必须在同一个库
   content_id   TEXT,                       -- 内容键 id (合并目标 'c:<id>'); NULL = 旧会话
@@ -139,15 +147,23 @@ CREATE TABLE IF NOT EXISTS blob_journal (
 CREATE INDEX IF NOT EXISTS idx_bj_db ON blob_journal(db_id);
 
 -- 播种主库行（IGNORE: 已有注册表的库重跑本文件不会被覆盖。database_id 留空不影响使用,
--- 配置了 CF_API_TOKEN + CF_ACCOUNT_ID 后由每日校准自动回填; slot_quota=10 为免费版
--- 账号总名额, 可按需调小）
-INSERT OR IGNORE INTO storage_dbs (id, binding, label, role, state, slot_quota, created_at)
-VALUES (1, 'DB', '主库', 'primary', 'active', 10, 1757904000000);
+-- 配置了 CF_API_TOKEN + CF_ACCOUNT_ID 后由每日校准自动回填。取值与
+-- migrations/2026-09-15-db-sharding.sql 对齐: reserve_bytes=100MiB, slot_quota=6
+-- = 1 主 + 5 从; 账号 10 库中其余项目占 4。可按需调小/调大）
+INSERT OR IGNORE INTO storage_dbs (id, binding, label, role, state, reserve_bytes, slot_quota, created_at)
+VALUES (1, 'DB', '主库', 'primary', 'active', 104857600, 6, 1757904000000);
+
+-- 迁移版本台账（见 migrations/2026-10-13-stage0-baseline.sql）
+-- 记录已应用的迁移文件名, 让迁移脚本可判断是否重复执行。
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version    TEXT PRIMARY KEY,
+  applied_at INTEGER NOT NULL
+);
 
 -- 歌词持久化(见 migrations/2026-09-16-lyrics-store.sql)
 -- 只写"取到歌词"的结果(found=1), 长期有效(拉黑/改歌曲信息时删); "没找到"不入库, 只走边缘缓存 6 小时
 CREATE TABLE IF NOT EXISTS lyrics (
-  path       TEXT PRIMARY KEY,
+  node_id    INTEGER PRIMARY KEY,   -- fs_nodes.id (改名/移动后歌词跟随)
   found      INTEGER NOT NULL DEFAULT 0,
   source     TEXT,
   synced     TEXT,
@@ -163,7 +179,22 @@ CREATE INDEX IF NOT EXISTS idx_lyrics_fetched_at ON lyrics (fetched_at);
 
 -- 歌词拉黑(见 migrations/2026-09-16-lyrics-reject.sql)
 CREATE TABLE IF NOT EXISTS lyrics_reject (
-  path    TEXT PRIMARY KEY,
+  node_id INTEGER PRIMARY KEY,
   sources TEXT NOT NULL DEFAULT '[]',
   ts      INTEGER NOT NULL
 );
+
+-- 歌曲元数据: 用户手动覆盖的歌名/歌手/专辑/歌词偏移(见 migrations/2026-09-15-track-meta.sql)
+-- 此前只存在于该迁移文件, schema.sql 漏了 → 按本文件重建会缺表, 代码只能靠运行时自愈。此处补齐。
+CREATE TABLE IF NOT EXISTS track_meta (
+  node_id      INTEGER PRIMARY KEY,
+  title        TEXT,
+  artist       TEXT,
+  album        TEXT,
+  lyric_offset INTEGER NOT NULL DEFAULT 0,
+  lrc          TEXT,
+  trans        TEXT,
+  source       TEXT,
+  updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_track_meta_updated ON track_meta(updated_at);
